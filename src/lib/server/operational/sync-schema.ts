@@ -4,7 +4,7 @@ const eventIdSchema = z.string().regex(/^evt-[a-f0-9]{64}$/);
 const clientIdSchema = z.string().regex(/^desktop-[a-f0-9]{64}$/);
 const shortText = z.string().max(512);
 const longText = z.string().max(8_192);
-const assetText = z.string().max(262_144);
+const assetText = z.string().max(10_485_760);
 const finiteNumber = z.number().finite();
 const integer = z.number().int().safe();
 
@@ -256,6 +256,41 @@ const settingUpsertPayload = z
   })
   .strict();
 
+const companyProfileUpdatePayload = z
+  .object({
+    id: optionalShortText,
+    company_name: shortText.min(1),
+    branch_name: optionalShortText,
+    logo_url: assetText.nullable().optional(),
+    signature_url: assetText.nullable().optional(),
+    address: optionalLongText,
+    phone: optionalShortText,
+    email: optionalShortText,
+    website: optionalShortText,
+    leader_name: optionalShortText,
+    leader_title: optionalShortText,
+    leader_nip: optionalShortText,
+    card_terms: optionalLongText,
+    timezone: optionalShortText,
+    created_at: optionalShortText,
+    updated_at: optionalShortText,
+  })
+  .strict();
+
+const idCardTemplateSavePayload = z
+  .object({
+    id: optionalShortText,
+    name: shortText.min(1),
+    orientation: z.enum(["portrait", "landscape"]),
+    front_bg_url: assetText.nullable().optional(),
+    back_bg_url: assetText.nullable().optional(),
+    elements_json: assetText.min(2),
+    is_active: optionalNumber,
+    created_at: optionalShortText,
+    updated_at: optionalShortText,
+  })
+  .strict();
+
 export const operationalSyncEventSchema = z.union([
   eventSchema("employee", "create", employeeCreatePayload),
   eventSchema("employee", "update", employeeUpdatePayload),
@@ -282,6 +317,9 @@ export const operationalSyncEventSchema = z.union([
   eventSchema("holiday", "delete", holidayDeletePayload),
   eventSchema("setting", "upsert", settingUpsertPayload),
   eventSchema("setting", "update", settingUpsertPayload),
+  eventSchema("company-profile", "update", companyProfileUpdatePayload),
+  eventSchema("id-card-template", "save", idCardTemplateSavePayload),
+  eventSchema("id-card-template", "update", idCardTemplateSavePayload),
   eventSchema("attendance", "scan", attendanceScanPayload),
   eventSchema(
     "attendance",

@@ -136,7 +136,7 @@ Lakukan pengujian akhir pada HP fisik sebelum serahkan ke customer:
 | 5 | **Anti Double-Scan** | Scan QR yang sama berturut-turut dalam 10 detik | Scan kedua diabaikan/ditolak (proteksi cooldown aktif) |
 | 6 | **Mode Full Offline** | Aktifkan *Mode Pesawat (Airplane Mode)*, tutup aplikasi, buka kembali, dan login | Login offline berhasil via Vault AES-256-GCM |
 | 7 | **Scan Offline** | Scan QR karyawan saat Mode Pesawat | Absensi tercatat di SQLite lokal, antrean outbox bertambah |
-| 8 | **Auto-Sync Kembali** | Matikan Mode Pesawat (koneksi pulih) | Data absensi outbox otomatis terunggah ke Cloud Server dalam hitungan detik |
+| 8 | **Auto-Sync Kembali** | Matikan Mode Pesawat (koneksi pulih) | Data absensi outbox otomatis terunggah ke Cloud Server dan 12 tabel snapshot operasional (termasuk Profil Instansi & Template ID Card) tersinkronisasi |
 | 9 | **Menu Operasional** | Buka tab *Operasional* (Koreksi Admin & Backup) | Form terbuka lancar dan tersimpan ke SQLite lokal |
 | 10 | **Logout & Keamanan** | Buka tab *Pengaturan* → *Keluar dari Akun* | Sesi terhapus aman dari memori dan kembali ke form login |
 
