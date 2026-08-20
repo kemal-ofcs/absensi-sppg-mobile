@@ -6,6 +6,7 @@ import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { canAccessArea } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
 import { getRekapHarian, getRiwayatScan } from "@/lib/gateways/report";
@@ -14,8 +15,9 @@ import { useDebounce } from "@/lib/hooks/useDebounce";
 type HistoryTab = "daily" | "scan-logs";
 
 export default function HistoryPage() {
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
   const router = useRouter();
+  const canViewHistory = canAccessArea(user, "history");
 
   const [activeTab, setActiveTab] = useState<HistoryTab>("daily");
   const [date, setDate] = useState<string>(
@@ -66,10 +68,22 @@ export default function HistoryPage() {
   }, []);
 
   useEffect(() => {
-    if (isAuthenticated) {
+    if (isAuthenticated && canViewHistory) {
       void loadData(date, activeTab);
     }
-  }, [date, activeTab, isAuthenticated, loadData]);
+  }, [date, activeTab, isAuthenticated, canViewHistory, loadData]);
+
+  useEffect(() => {
+    const onSyncCompleted = () => {
+      if (isAuthenticated && canViewHistory) {
+        void loadData(date, activeTab);
+      }
+    };
+    window.addEventListener("sppg:sync-completed", onSyncCompleted);
+    return () => {
+      window.removeEventListener("sppg:sync-completed", onSyncCompleted);
+    };
+  }, [date, activeTab, isAuthenticated, canViewHistory, loadData]);
 
   const handleTabChange = (tab: HistoryTab) => {
     triggerHaptic("light");
@@ -133,6 +147,34 @@ export default function HistoryPage() {
       return matchSearch && matchStatus;
     });
   }, [scanLogs, debouncedSearch, statusFilter]);
+
+  if (!authLoading && isAuthenticated && !canViewHistory) {
+    return (
+      <MobileAppShell>
+        <div className="flex min-h-[65vh] flex-col items-center justify-center p-6 text-center">
+          <div className="mb-4 grid size-16 place-items-center rounded-3xl border border-amber-500/30 bg-amber-500/10 text-amber-400 shadow-inner">
+            <Icon name="clock" className="size-8 stroke-[2.2]" />
+          </div>
+          <h2 className="text-lg font-black text-white">Akses Dibatasi</h2>
+          <p className="mt-2 max-w-xs text-xs leading-relaxed text-slate-400">
+            Akun operator Anda ({user?.role || "Scanner"}) tidak memiliki hak
+            akses untuk melihat rekap riwayat absensi. Hubungi administrator
+            jika membutuhkan akses ini.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic("light");
+              router.replace("/dashboard");
+            }}
+            className="mt-6 rounded-2xl bg-sky-400 px-6 py-2.5 text-xs font-black text-slate-950 shadow-lg transition active:scale-95 hover:bg-sky-300"
+          >
+            Kembali ke Beranda
+          </button>
+        </div>
+      </MobileAppShell>
+    );
+  }
 
   return (
     <MobileAppShell>

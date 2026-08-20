@@ -14,7 +14,12 @@ use super::{
     config::MobileState,
     models::{CommandError, OfflineCredential, OperatorUser},
     storage,
+    turso::TursoConfig,
 };
+
+const TURSO_VAULT_FILE: &str = "turso_config.vault";
+const TURSO_SALT_FILE: &str = "turso_config.salt";
+const TURSO_SECRET_PASSPHRASE: &str = "sppg-vault-master-turso-v1";
 
 fn identity_key(server_origin: &str, operator_id: i64) -> String {
     let mut hash = Sha256::new();
@@ -211,6 +216,107 @@ pub fn load_offline(
     Ok(credential)
 }
 
+pub fn save_turso_config(
+    state: &MobileState,
+    config: &TursoConfig,
+) -> Result<(), CommandError> {
+    let directory = state.data_dir.join("credentials");
+    fs::create_dir_all(&directory).map_err(|_| CommandError::internal())?;
+    let vault_path = directory.join(TURSO_VAULT_FILE);
+    let salt_path = directory.join(TURSO_SALT_FILE);
+
+    let _guard = state
+        .vault_lock
+        .lock()
+        .map_err(|_| CommandError::internal())?;
+
+    let salt = if salt_path.is_file() {
+        let bytes = fs::read(&salt_path).map_err(|_| CommandError::internal())?;
+        if bytes.len() < 16 {
+            let mut new_salt = [0u8; 32];
+            rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut new_salt);
+            let _ = fs::write(&salt_path, &new_salt);
+            new_salt.to_vec()
+        } else {
+            bytes
+        }
+    } else {
+        let mut new_salt = [0u8; 32];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut new_salt);
+        fs::write(&salt_path, &new_salt).map_err(|_| CommandError::internal())?;
+        new_salt.to_vec()
+    };
+
+    let mut key = [0u8; 32];
+    Argon2::default()
+        .hash_password_into(TURSO_SECRET_PASSPHRASE.as_bytes(), &salt, &mut key)
+        .map_err(|_| CommandError::internal())?;
+
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| CommandError::internal())?;
+
+    let mut nonce_bytes = [0u8; 12];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let serialized = serde_json::to_vec(config).map_err(|_| CommandError::internal())?;
+    let ciphertext = cipher
+        .encrypt(nonce, serialized.as_ref())
+        .map_err(|_| CommandError::internal())?;
+
+    let mut file_payload = Vec::with_capacity(12 + ciphertext.len());
+    file_payload.extend_from_slice(&nonce_bytes);
+    file_payload.extend_from_slice(&ciphertext);
+
+    fs::write(&vault_path, file_payload).map_err(|_| CommandError::internal())?;
+    Ok(())
+}
+
+pub fn load_turso_config(state: &MobileState) -> Result<Option<TursoConfig>, CommandError> {
+    let directory = state.data_dir.join("credentials");
+    let vault_path = directory.join(TURSO_VAULT_FILE);
+    let salt_path = directory.join(TURSO_SALT_FILE);
+
+    if !vault_path.is_file() || !salt_path.is_file() {
+        return Ok(None);
+    }
+
+    let _guard = state
+        .vault_lock
+        .lock()
+        .map_err(|_| CommandError::internal())?;
+
+    let salt = fs::read(&salt_path).map_err(|_| CommandError::internal())?;
+    let mut key = [0u8; 32];
+    Argon2::default()
+        .hash_password_into(TURSO_SECRET_PASSPHRASE.as_bytes(), &salt, &mut key)
+        .map_err(|_| CommandError::internal())?;
+
+    let payload = fs::read(&vault_path).map_err(|_| CommandError::internal())?;
+    if payload.len() < 12 + 16 {
+        return Ok(None);
+    }
+
+    let (nonce_bytes, ciphertext) = payload.split_at(12);
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| CommandError::internal())?;
+    let decrypted = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| CommandError::internal())?;
+
+    let config: TursoConfig = serde_json::from_slice(&decrypted).map_err(|_| CommandError::internal())?;
+    Ok(Some(config))
+}
+
+pub fn clear_turso_config(state: &MobileState) -> Result<(), CommandError> {
+    let directory = state.data_dir.join("credentials");
+    let vault_path = directory.join(TURSO_VAULT_FILE);
+    let salt_path = directory.join(TURSO_SALT_FILE);
+    let _ = fs::remove_file(vault_path);
+    let _ = fs::remove_file(salt_path);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Mutex, RwLock};
@@ -218,7 +324,6 @@ mod tests {
     use reqwest::Client;
     use rusqlite::{params, Connection};
     use tempfile::TempDir;
-    use url::Url;
 
     use super::{credential_paths, identity_key, load_offline, provision, write_snapshot};
     use crate::mobile::{
@@ -230,11 +335,11 @@ mod tests {
     fn test_state(directory: &TempDir, origin: &str, hours: u64) -> MobileState {
         storage::initialize(directory.path()).expect("test schema");
         MobileState {
-            api_base_url: RwLock::new(Url::parse(origin).expect("test origin")),
             server_origin: RwLock::new(origin.to_owned()),
             offline_max_age_hours: hours,
             data_dir: directory.path().to_owned(),
             http: Client::new(),
+            turso_config: RwLock::new(None),
             session: Mutex::new(None),
             vault_lock: Mutex::new(()),
         }

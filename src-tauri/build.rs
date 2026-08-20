@@ -60,6 +60,10 @@ const MOBILE_COMMANDS: &[&str] = &[
     "desktop_trigger_generate_alfa",
     "desktop_get_server_url",
     "desktop_set_server_url",
+    "desktop_get_turso_url",
+    "desktop_save_turso_config",
+    "desktop_test_turso_connection",
+    "desktop_clear_turso_config",
 ];
 
 fn local_build_values() -> HashMap<String, String> {
@@ -87,20 +91,11 @@ fn expose_build_value(name: &str, local: &HashMap<String, String>) -> Option<Str
 fn main() {
     println!("cargo:rerun-if-changed=../.env");
     let local = local_build_values();
-    let api_base_url = expose_build_value("SPPG_API_BASE_URL", &local);
+    expose_build_value("TURSO_DATABASE_URL", &local);
+    expose_build_value("TURSO_AUTH_TOKEN", &local);
+    expose_build_value("SPPG_API_BASE_URL", &local);
     expose_build_value("SPPG_DEV_API_BASE_URL", &local);
-    let offline_hours = expose_build_value("SPPG_OFFLINE_AUTH_MAX_AGE_HOURS", &local);
-
-    if env::var("PROFILE").as_deref() == Ok("release") {
-        assert!(
-            api_base_url.is_some(),
-            "SPPG_API_BASE_URL wajib tersedia untuk build release Mobile."
-        );
-        assert!(
-            offline_hours.is_some(),
-            "SPPG_OFFLINE_AUTH_MAX_AGE_HOURS wajib tersedia untuk build release Mobile."
-        );
-    }
+    expose_build_value("SPPG_OFFLINE_AUTH_MAX_AGE_HOURS", &local);
 
     tauri_build::try_build(
         tauri_build::Attributes::new()

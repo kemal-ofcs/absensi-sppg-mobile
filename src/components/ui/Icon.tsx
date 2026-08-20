@@ -1,11 +1,13 @@
 import type { ReactNode, SVGProps } from "react";
 
 export type IconName =
+  | "alert"
   | "calendar"
   | "check"
   | "chevron-right"
   | "clock"
   | "dashboard"
+  | "database"
   | "home"
   | "logout"
   | "lock"
@@ -15,6 +17,7 @@ export type IconName =
   | "settings"
   | "sync"
   | "tools"
+  | "trash"
   | "upload"
   | "user"
   | "users"
@@ -22,6 +25,13 @@ export type IconName =
   | "wifi-off";
 
 const paths: Record<IconName, ReactNode> = {
+  alert: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" x2="12" y1="8" y2="12" />
+      <line x1="12" x2="12.01" y1="16" y2="16" />
+    </>
+  ),
   calendar: (
     <>
       <rect width="18" height="18" x="3" y="4" rx="2" />
@@ -42,6 +52,13 @@ const paths: Record<IconName, ReactNode> = {
       <rect width="7" height="5" x="14" y="3" rx="1" />
       <rect width="7" height="9" x="14" y="12" rx="1" />
       <rect width="7" height="5" x="3" y="16" rx="1" />
+    </>
+  ),
+  database: (
+    <>
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+      <path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3" />
     </>
   ),
   home: (
@@ -103,6 +120,13 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <path d="M14.7 6.3a4 4 0 0 0-5-5l2.1 2.1-2.4 2.4-2.1-2.1a4 4 0 0 0 5 5l7.4 7.4a2 2 0 0 1-2.8 2.8l-7.4-7.4" />
       <path d="m5 13-3.6 3.6a2 2 0 0 0 2.8 2.8L7.8 16" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+      <line x1="10" x2="10" y1="11" y2="17" />
+      <line x1="14" x2="14" y1="11" y2="17" />
     </>
   ),
   upload: (

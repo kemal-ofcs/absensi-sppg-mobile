@@ -40,6 +40,17 @@ const JENIS_KOREKSI_OPTIONS = [
   "Terlambat",
 ] as const;
 
+const STATUS_ABSEN_MANUAL_OPTIONS = [
+  { value: "", label: "✨ Otomatis (Generate Sistem Sesuai Jam)" },
+  { value: "Lengkap", label: "Lengkap (Masuk & Pulang)" },
+  { value: "Belum Pulang", label: "Belum Pulang (Hanya Masuk)" },
+  { value: "Perlu Verifikasi", label: "Perlu Verifikasi (Hanya Pulang)" },
+  { value: "Tidak Hadir", label: "Tidak Hadir (Sakit/Izin/Alfa)" },
+  { value: "Tepat Waktu", label: "Tepat Waktu" },
+  { value: "Terlambat", label: "Terlambat" },
+  { value: "Datang Lebih Awal", label: "Datang Lebih Awal" },
+] as const;
+
 export default function OperationalPage() {
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
   const router = useRouter();
@@ -86,8 +97,10 @@ export default function OperationalPage() {
   const [manJamMasuk, setManJamMasuk] = useState<string>("08:00");
   const [manJamPulang, setManJamPulang] = useState<string>("16:00");
   const [manStatusKehadiran, setManStatusKehadiran] = useState<string>("Hadir");
-  const [manStatusAbsen, setManStatusAbsen] = useState<string>("Tepat Waktu");
+  const [manStatusAbsen, setManStatusAbsen] = useState<string>("");
   const [manKeterangan, setManKeterangan] = useState<string>("");
+
+  const isOperational = canAccessArea(user, "operational");
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
@@ -130,13 +143,13 @@ export default function OperationalPage() {
         if (!cancelled) setLoadingMaster(false);
       }
     }
-    if (isAuthenticated) {
+    if (isAuthenticated && isOperational) {
       void loadMasters();
     }
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated]);
+  }, [isAuthenticated, isOperational]);
 
   // Load tab-specific records on date or tab change
   const loadTabRecords = useCallback(
@@ -149,14 +162,12 @@ export default function OperationalPage() {
         } else if (tab === "backup") {
           const data = await getDaftarBackup({ tanggal: targetDate });
           setBackups(data || []);
-        } else {
+        } else if (tab === "manual") {
           const data = await getDaftarImport({ tanggal: targetDate });
           setImports(data || []);
         }
       } catch {
-        if (tab === "koreksi") setCorrections([]);
-        else if (tab === "backup") setBackups([]);
-        else setImports([]);
+        // Silently handled
       } finally {
         setLoadingList(false);
       }
@@ -165,14 +176,12 @@ export default function OperationalPage() {
   );
 
   useEffect(() => {
-    if (isAuthenticated) {
+    if (isAuthenticated && isOperational) {
       void loadTabRecords(date, activeTab);
     }
-  }, [date, activeTab, isAuthenticated, loadTabRecords]);
+  }, [date, activeTab, isAuthenticated, isOperational, loadTabRecords]);
 
   // Check RBAC Access
-  const isOperational = canAccessArea(user, "operational");
-
   if (!authLoading && !isOperational) {
     return (
       <MobileAppShell>
@@ -957,13 +966,11 @@ export default function OperationalPage() {
                     onChange={(e) => setManStatusAbsen(e.target.value)}
                     className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-xs text-white outline-none focus:border-sky-400"
                   >
-                    {["Tepat Waktu", "Terlambat", "Datang Lebih Awal"].map(
-                      (a) => (
-                        <option key={a} value={a}>
-                          {a}
-                        </option>
-                      ),
-                    )}
+                    {STATUS_ABSEN_MANUAL_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>

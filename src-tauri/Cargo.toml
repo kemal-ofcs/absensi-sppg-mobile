@@ -20,7 +20,7 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "gzip", "brotli", "deflate"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "0.26"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
@@ -31,6 +31,9 @@ zeroize = "1.8.2"
 aes-gcm = "0.10.3"
 argon2 = "0.5.3"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
+base64 = "0.22"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hmac = "0.12"
 
 [dev-dependencies]
 tempfile = "3.23.0"

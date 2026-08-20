@@ -9,6 +9,23 @@ import { useAuth } from "@/lib/context/AuthContext";
 import { getServerUrl, setServerUrl } from "@/lib/gateways/server-config";
 import { useOnlineStatus } from "@/lib/hooks/useOnlineStatus";
 
+function parseCooldownSeconds(msg: string): number {
+  if (
+    !msg.toLowerCase().includes("terlalu banyak") &&
+    !msg.toLowerCase().includes("rate_limited") &&
+    !msg.toLowerCase().includes("dikunci")
+  ) {
+    return 0;
+  }
+  let totalSec = 0;
+  const minMatch = msg.match(/(\d+)\s*menit/i);
+  const secMatch = msg.match(/(\d+)\s*detik/i);
+  if (minMatch) totalSec += Number.parseInt(minMatch[1], 10) * 60;
+  if (secMatch) totalSec += Number.parseInt(secMatch[1], 10);
+  if (totalSec === 0) totalSec = 120;
+  return totalSec;
+}
+
 export default function LoginPage() {
   const { login, isAuthenticated, isLoading: authLoading } = useAuth();
   const router = useRouter();
@@ -17,8 +34,24 @@ export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [cooldownSeconds, setCooldownSeconds] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
+
+  // Live countdown ticker
+  useEffect(() => {
+    if (cooldownSeconds <= 0) return;
+    const timer = setInterval(() => {
+      setCooldownSeconds((prev) => {
+        if (prev <= 1) {
+          setErrorMessage("");
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [cooldownSeconds]);
 
   // Server Endpoint Settings state
   const [serverUrl, setServerUrlState] = useState(
@@ -46,7 +79,13 @@ export default function LoginPage() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (isSubmittingRef.current || !username.trim() || !password) return;
+    if (
+      isSubmittingRef.current ||
+      cooldownSeconds > 0 ||
+      !username.trim() ||
+      !password
+    )
+      return;
 
     isSubmittingRef.current = true;
     setIsSubmitting(true);
@@ -60,7 +99,10 @@ export default function LoginPage() {
         router.replace("/dashboard");
       } else {
         triggerHaptic("error");
-        setErrorMessage(result.pesan || "Login gagal.");
+        const msg = result.pesan || "Login gagal.";
+        setErrorMessage(msg);
+        const cooldown = parseCooldownSeconds(msg);
+        if (cooldown > 0) setCooldownSeconds(cooldown);
       }
     } catch (err: unknown) {
       triggerHaptic("error");
@@ -69,6 +111,8 @@ export default function LoginPage() {
           ? err.message
           : "Gagal terhubung ke modul autentikasi.";
       setErrorMessage(message);
+      const cooldown = parseCooldownSeconds(message);
+      if (cooldown > 0) setCooldownSeconds(cooldown);
     } finally {
       setIsSubmitting(false);
       isSubmittingRef.current = false;
@@ -141,14 +185,34 @@ export default function LoginPage() {
 
         {/* Login Form Card */}
         <div className="w-full rounded-3xl border border-white/15 bg-slate-900/90 p-6 shadow-2xl backdrop-blur-2xl">
-          {errorMessage && (
+          {cooldownSeconds > 0 ? (
+            <div className="mb-4 rounded-2xl border border-amber-500/30 bg-amber-950/50 p-4 text-center text-xs font-medium text-amber-200 backdrop-blur-md">
+              <div className="flex items-center justify-center gap-2 mb-1">
+                <span className="text-base animate-pulse">⏳</span>
+                <span className="font-bold text-amber-300">
+                  Akun Terkunci Sementara
+                </span>
+              </div>
+              <p className="text-[11px] text-amber-200/80">
+                Terlalu banyak percobaan gagal. Silakan coba lagi dalam:
+              </p>
+              <div className="mt-2 inline-flex items-center gap-1 rounded-xl bg-slate-950/80 px-3 py-1 font-mono text-sm font-black text-amber-400 border border-amber-500/20">
+                <span>
+                  {Math.floor(cooldownSeconds / 60) > 0
+                    ? `${Math.floor(cooldownSeconds / 60)}m `
+                    : ""}
+                  {cooldownSeconds % 60}s
+                </span>
+              </div>
+            </div>
+          ) : errorMessage ? (
             <FeedbackBanner
               type="error"
               message={errorMessage}
               className="mb-4"
               onClose={() => setErrorMessage("")}
             />
-          )}
+          ) : null}
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <div>
@@ -166,7 +230,8 @@ export default function LoginPage() {
                 placeholder="contoh: super001 atau SPD001"
                 autoComplete="username"
                 required
-                className="w-full min-h-12 rounded-2xl border border-white/15 bg-slate-950 px-4 text-sm text-white placeholder-slate-500 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-400/20 transition"
+                disabled={cooldownSeconds > 0}
+                className="w-full min-h-12 rounded-2xl border border-white/15 bg-slate-950 px-4 text-sm text-white placeholder-slate-500 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-400/20 transition disabled:opacity-50"
               />
             </div>
 
@@ -185,13 +250,19 @@ export default function LoginPage() {
                 placeholder="••••••••"
                 autoComplete="current-password"
                 required
-                className="w-full min-h-12 rounded-2xl border border-white/15 bg-slate-950 px-4 text-sm text-white placeholder-slate-500 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-400/20 transition"
+                disabled={cooldownSeconds > 0}
+                className="w-full min-h-12 rounded-2xl border border-white/15 bg-slate-950 px-4 text-sm text-white placeholder-slate-500 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-400/20 transition disabled:opacity-50"
               />
             </div>
 
             <button
               type="submit"
-              disabled={isSubmitting || !username.trim() || !password}
+              disabled={
+                isSubmitting ||
+                cooldownSeconds > 0 ||
+                !username.trim() ||
+                !password
+              }
               className="mt-2 flex min-h-12 w-full items-center justify-center rounded-2xl bg-gradient-to-r from-sky-400 via-sky-500 to-blue-600 font-black text-sm text-slate-950 shadow-xl shadow-sky-950/60 disabled:opacity-50 active:scale-[0.98] transition-all"
             >
               {isSubmitting ? (
@@ -199,6 +270,8 @@ export default function LoginPage() {
                   <div className="size-4 rounded-full border-2 border-slate-950 border-t-transparent animate-spin" />
                   <span>Memverifikasi...</span>
                 </div>
+              ) : cooldownSeconds > 0 ? (
+                <span>Terkunci ({cooldownSeconds}s)</span>
               ) : (
                 <span>Masuk Aplikasi</span>
               )}

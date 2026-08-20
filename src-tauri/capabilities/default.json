@@ -64,6 +64,10 @@
     "allow-desktop-save-alfa-settings",
     "allow-desktop-trigger-generate-alfa",
     "allow-desktop-get-server-url",
-    "allow-desktop-set-server-url"
+    "allow-desktop-set-server-url",
+    "allow-desktop-get-turso-url",
+    "allow-desktop-save-turso-config",
+    "allow-desktop-test-turso-connection",
+    "allow-desktop-clear-turso-config"
   ]
 }

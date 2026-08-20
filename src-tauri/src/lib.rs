@@ -75,6 +75,10 @@ pub fn run() {
             mobile::commands::desktop_trigger_generate_alfa,
             mobile::commands::desktop_get_server_url,
             mobile::commands::desktop_set_server_url,
+            mobile::commands::desktop_get_turso_url,
+            mobile::commands::desktop_save_turso_config,
+            mobile::commands::desktop_test_turso_connection,
+            mobile::commands::desktop_clear_turso_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -4,67 +4,26 @@ use reqwest::Client;
 use tauri::{AppHandle, Manager};
 use url::Url;
 
-use super::{models::{CommandError, MobileSession}, storage};
+use super::{
+    models::{CommandError, MobileSession},
+    secrets, storage,
+    turso::{normalize_turso_url, TursoClient, TursoConfig},
+};
 
-const BUILD_API_BASE_URL: Option<&str> = option_env!("SPPG_API_BASE_URL");
-const BUILD_DEV_API_BASE_URL: Option<&str> = option_env!("SPPG_DEV_API_BASE_URL");
 const BUILD_OFFLINE_MAX_AGE_HOURS: Option<&str> = option_env!("SPPG_OFFLINE_AUTH_MAX_AGE_HOURS");
+const BUILD_TURSO_DATABASE_URL: Option<&str> = option_env!("TURSO_DATABASE_URL");
+const BUILD_TURSO_AUTH_TOKEN: Option<&str> = option_env!("TURSO_AUTH_TOKEN");
 const MOBILE_HTTP_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_FALLBACK_URL: &str = "https://absensi-sppg-seven.vercel.app";
 
 pub struct MobileState {
-    pub api_base_url: std::sync::RwLock<Url>,
     pub server_origin: std::sync::RwLock<String>,
     pub offline_max_age_hours: u64,
     pub data_dir: PathBuf,
     pub http: Client,
+    pub turso_config: std::sync::RwLock<Option<TursoConfig>>,
     pub session: std::sync::Mutex<Option<MobileSession>>,
     pub vault_lock: std::sync::Mutex<()>,
-}
-
-fn parse_api_base_url_value(configured: Option<&str>, debug_build: bool) -> Result<Url, String> {
-    let configured = configured
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(DEFAULT_FALLBACK_URL);
-    if configured.is_empty() {
-        return Err("SPPG_API_BASE_URL belum dikonfigurasi untuk build Mobile.".into());
-    }
-
-    let mut url = Url::parse(configured).map_err(|_| "SPPG_API_BASE_URL tidak valid.")?;
-    if url.username() != ""
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || !matches!(url.path(), "" | "/")
-    {
-        return Err(
-            "SPPG_API_BASE_URL harus berupa origin tanpa kredensial, path, query, atau fragment."
-                .into(),
-        );
-    }
-    let local_debug = debug_build
-        && url.scheme() == "http"
-        && (
-            matches!(
-                url.host_str(),
-                Some("localhost" | "127.0.0.1" | "::1" | "10.0.2.2")
-            ) || url.host().map_or(false, |h| matches!(h, url::Host::Ipv4(_)))
-        );
-    if url.scheme() != "https" && !local_debug {
-        return Err("SPPG_API_BASE_URL wajib memakai HTTPS pada build release.".into());
-    }
-    url.set_path("");
-    Ok(url)
-}
-
-fn parse_api_base_url() -> Result<Url, String> {
-    let debug_build = cfg!(debug_assertions);
-    let configured = if debug_build {
-        BUILD_DEV_API_BASE_URL
-    } else {
-        BUILD_API_BASE_URL
-    };
-    parse_api_base_url_value(configured, debug_build)
 }
 
 fn parse_offline_hours_value(configured: Option<&str>, debug_build: bool) -> Result<u64, String> {
@@ -93,14 +52,6 @@ impl MobileState {
             .map_err(|_| "Folder data lokal aplikasi tidak dapat dibuat.")?;
         storage::initialize(&data_dir)?;
 
-        let saved_url = storage::get_system_setting(&data_dir, "server_api_base_url").ok().flatten();
-        let api_base_url = if let Some(saved) = saved_url {
-            Url::parse(&saved).unwrap_or_else(|_| parse_api_base_url().unwrap_or_else(|_| Url::parse(DEFAULT_FALLBACK_URL).unwrap()))
-        } else {
-            parse_api_base_url()?
-        };
-        let server_origin = api_base_url.origin().ascii_serialization();
-
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let tls_config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
@@ -119,81 +70,137 @@ impl MobileState {
             .build()
             .map_err(|_| "HTTP client Mobile tidak dapat dibuat.")?;
 
+        let temp_state = Self {
+            server_origin: std::sync::RwLock::new(DEFAULT_FALLBACK_URL.into()),
+            offline_max_age_hours,
+            data_dir: data_dir.clone(),
+            http: http.clone(),
+            turso_config: std::sync::RwLock::new(None),
+            session: std::sync::Mutex::new(None),
+            vault_lock: std::sync::Mutex::new(()),
+        };
+
+        // 1. Cek vault terenkripsi
+        let vault_config = secrets::load_turso_config(&temp_state).ok().flatten();
+
+        // 2. Cek database setting lokal
+        let db_turso_url = storage::get_system_setting(&data_dir, "turso_database_url").ok().flatten();
+        let db_turso_token = storage::get_system_setting(&data_dir, "turso_auth_token").ok().flatten();
+
+        let resolved_config = vault_config.or_else(|| {
+            if let (Some(u), Some(t)) = (db_turso_url, db_turso_token) {
+                if !u.trim().is_empty() {
+                    return Some(TursoConfig {
+                        database_url: u.trim().to_owned(),
+                        auth_token: t.trim().to_owned(),
+                    });
+                }
+            }
+            if let (Some(u), Some(t)) = (BUILD_TURSO_DATABASE_URL, BUILD_TURSO_AUTH_TOKEN) {
+                if !u.trim().is_empty() {
+                    return Some(TursoConfig {
+                        database_url: u.trim().to_owned(),
+                        auth_token: t.trim().to_owned(),
+                    });
+                }
+            }
+            None
+        });
+
+        let server_origin = if let Some(ref cfg) = resolved_config {
+            normalize_turso_url(&cfg.database_url)
+                .map(|u| u.origin().ascii_serialization())
+                .unwrap_or_else(|_| DEFAULT_FALLBACK_URL.into())
+        } else {
+            let saved_url = storage::get_system_setting(&data_dir, "server_api_base_url").ok().flatten();
+            saved_url.unwrap_or_else(|| DEFAULT_FALLBACK_URL.into())
+        };
+
         Ok(Self {
-            api_base_url: std::sync::RwLock::new(api_base_url),
             server_origin: std::sync::RwLock::new(server_origin),
             offline_max_age_hours,
             data_dir,
             http,
+            turso_config: std::sync::RwLock::new(resolved_config),
             session: std::sync::Mutex::new(None),
             vault_lock: std::sync::Mutex::new(()),
         })
-    }
-
-    pub fn api_base_url(&self) -> Url {
-        self.api_base_url.read().unwrap().clone()
     }
 
     pub fn server_origin(&self) -> String {
         self.server_origin.read().unwrap().clone()
     }
 
-    pub fn set_server_url(&self, raw_url: &str) -> Result<String, CommandError> {
-        let trimmed = raw_url.trim();
-        if trimmed.is_empty() {
-            return Err(CommandError::new(
-                "SERVER_URL_INVALID",
-                "URL Server tidak boleh kosong.",
-            ));
+    pub fn api_base_url(&self) -> Url {
+        Url::parse(&self.server_origin())
+            .unwrap_or_else(|_| Url::parse(DEFAULT_FALLBACK_URL).unwrap())
+    }
+
+    pub fn get_turso_client(&self) -> Result<TursoClient, CommandError> {
+        let config_guard = self.turso_config.read().unwrap();
+        if let Some(config) = config_guard.as_ref() {
+            TursoClient::from_config(config, self.http.clone())
+        } else {
+            Err(CommandError::new(
+                "TURSO_NOT_CONFIGURED",
+                "Database Cloud Turso belum dikonfigurasi. Silakan tambahkan URL dan Auth Token di Pengaturan.",
+            ))
         }
+    }
 
-        let mut parsed = Url::parse(trimmed).map_err(|_| {
-            CommandError::new(
-                "SERVER_URL_INVALID",
-                "Format URL Server tidak valid (contoh: https://absensi-sppg-seven.vercel.app atau http://127.0.0.1:3000).",
-            )
-        })?;
+    pub fn turso_config(&self) -> Option<TursoConfig> {
+        self.turso_config.read().unwrap().clone()
+    }
 
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(CommandError::new(
-                "SERVER_URL_INVALID",
-                "URL Server harus menggunakan protokol http atau https.",
-            ));
-        }
+    pub fn set_turso_config(
+        &self,
+        raw_url: &str,
+        auth_token: &str,
+    ) -> Result<String, CommandError> {
+        let normalized = normalize_turso_url(raw_url)?;
+        let origin = normalized.origin().ascii_serialization();
 
-        parsed.set_path("");
-        parsed.set_query(None);
-        parsed.set_fragment(None);
+        let resolved_token = if auth_token.trim().is_empty() {
+            self.turso_config()
+                .map(|c| c.auth_token)
+                .unwrap_or_default()
+        } else {
+            auth_token.trim().to_owned()
+        };
 
-        let origin = parsed.origin().ascii_serialization();
+        let config = TursoConfig {
+            database_url: raw_url.trim().to_owned(),
+            auth_token: resolved_token,
+        };
 
-        storage::set_system_setting(&self.data_dir, "server_api_base_url", parsed.as_str())?;
+        // Simpan ke vault terenkripsi
+        secrets::save_turso_config(self, &config)?;
 
-        *self.api_base_url.write().unwrap() = parsed;
+        // Simpan juga ke setting lokal sebagai fallback
+        storage::set_system_setting(&self.data_dir, "turso_database_url", &config.database_url)?;
+        storage::set_system_setting(&self.data_dir, "turso_auth_token", &config.auth_token)?;
+
+        *self.turso_config.write().unwrap() = Some(config);
         *self.server_origin.write().unwrap() = origin.clone();
 
         Ok(origin)
+    }
+
+    pub fn set_server_url(&self, raw_url: &str) -> Result<String, CommandError> {
+        self.set_turso_config(raw_url, "")
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_api_base_url_value, parse_offline_hours_value};
+    use super::{normalize_turso_url, parse_offline_hours_value};
 
     #[test]
-    fn release_endpoint_must_be_https_origin() {
-        assert!(parse_api_base_url_value(Some("https://sppg.example.com"), false).is_ok());
-        assert!(parse_api_base_url_value(Some("http://sppg.example.com"), false).is_err());
-        assert!(parse_api_base_url_value(Some("https://sppg.example.com/api"), false).is_err());
-        assert!(parse_api_base_url_value(Some("https://user@sppg.example.com"), false).is_err());
-    }
-
-    #[test]
-    fn localhost_or_emulator_http_is_debug_only() {
-        assert!(parse_api_base_url_value(None, true).is_ok());
-        assert!(parse_api_base_url_value(Some("http://10.0.2.2:3000"), true).is_ok());
-        assert!(parse_api_base_url_value(Some("http://127.0.0.1:3000"), true).is_ok());
-        assert!(parse_api_base_url_value(Some("http://10.0.2.2:3000"), false).is_err());
+    fn turso_endpoint_normalization() {
+        assert!(normalize_turso_url("libsql://customer.turso.io").is_ok());
+        assert!(normalize_turso_url("https://customer.turso.io").is_ok());
+        assert!(normalize_turso_url("http://localhost:8080").is_ok());
+        assert!(normalize_turso_url("").is_err());
     }
 
     #[test]

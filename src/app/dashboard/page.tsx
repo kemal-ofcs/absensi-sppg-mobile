@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
 import {
@@ -16,9 +17,12 @@ import {
 import { useClock } from "@/lib/hooks/useClock";
 
 export default function DashboardPage() {
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
   const router = useRouter();
   const clock = useClock();
+
+  const canViewMetrics = hasPermission(user, "dashboard.view");
+  const canViewHistory = canAccessArea(user, "history");
 
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [recentScans, setRecentScans] = useState<Record<string, unknown>[]>([]);
@@ -35,7 +39,7 @@ export default function DashboardPage() {
     async function loadData() {
       try {
         const [metricData, scansData] = await Promise.all([
-          getDashboardMetrics(),
+          canViewMetrics ? getDashboardMetrics() : Promise.resolve(null),
           getRiwayatScan({ limit: 5 }),
         ]);
         if (!cancelled) {
@@ -54,7 +58,7 @@ export default function DashboardPage() {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated]);
+  }, [isAuthenticated, canViewMetrics]);
 
   const formattedTime = clock
     ? clock.toLocaleTimeString("id-ID", {
@@ -119,58 +123,66 @@ export default function DashboardPage() {
           />
         </Link>
 
-        {/* Statistics Grid */}
-        <div className="grid grid-cols-2 gap-3">
-          <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4 backdrop-blur-md">
-            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-              Total Hadir
-            </span>
-            <div className="flex items-baseline gap-2 mt-1">
-              <span className="text-2xl font-black text-emerald-400">
-                {isLoading ? "--" : (metrics?.hadirHariIni ?? 0)}
+        {/* Statistics Grid (Hanya jika memiliki izin dashboard.view) */}
+        {canViewMetrics ? (
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4 backdrop-blur-md">
+              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                Total Hadir
               </span>
-              <span className="text-xs text-slate-400 font-medium">
-                / {metrics?.totalKaryawan ?? 0}
-              </span>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className="text-2xl font-black text-emerald-400">
+                  {isLoading ? "--" : (metrics?.hadirHariIni ?? 0)}
+                </span>
+                <span className="text-xs text-slate-400 font-medium">
+                  / {metrics?.totalKaryawan ?? 0}
+                </span>
+              </div>
             </div>
-          </div>
 
-          <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4 backdrop-blur-md">
-            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-              Terlambat
-            </span>
-            <div className="flex items-baseline gap-2 mt-1">
-              <span className="text-2xl font-black text-amber-400">
-                {isLoading ? "--" : (metrics?.terlambatHariIni ?? 0)}
+            <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4 backdrop-blur-md">
+              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                Terlambat
               </span>
-              <span className="text-xs text-slate-400 font-medium">orang</span>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className="text-2xl font-black text-amber-400">
+                  {isLoading ? "--" : (metrics?.terlambatHariIni ?? 0)}
+                </span>
+                <span className="text-xs text-slate-400 font-medium">
+                  orang
+                </span>
+              </div>
             </div>
-          </div>
 
-          <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4 backdrop-blur-md">
-            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-              Izin / Sakit
-            </span>
-            <div className="flex items-baseline gap-2 mt-1">
-              <span className="text-2xl font-black text-blue-400">
-                {isLoading ? "--" : (metrics?.sakitIzinHariIni ?? 0)}
+            <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4 backdrop-blur-md">
+              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                Izin / Sakit
               </span>
-              <span className="text-xs text-slate-400 font-medium">orang</span>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className="text-2xl font-black text-blue-400">
+                  {isLoading ? "--" : (metrics?.sakitIzinHariIni ?? 0)}
+                </span>
+                <span className="text-xs text-slate-400 font-medium">
+                  orang
+                </span>
+              </div>
             </div>
-          </div>
 
-          <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4 backdrop-blur-md">
-            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-              Alfa / Belum
-            </span>
-            <div className="flex items-baseline gap-2 mt-1">
-              <span className="text-2xl font-black text-rose-400">
-                {isLoading ? "--" : (metrics?.alfaHariIni ?? 0)}
+            <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4 backdrop-blur-md">
+              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                Alfa / Belum
               </span>
-              <span className="text-xs text-slate-400 font-medium">orang</span>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className="text-2xl font-black text-rose-400">
+                  {isLoading ? "--" : (metrics?.alfaHariIni ?? 0)}
+                </span>
+                <span className="text-xs text-slate-400 font-medium">
+                  orang
+                </span>
+              </div>
             </div>
           </div>
-        </div>
+        ) : null}
 
         {/* Recent Scans Section */}
         <div className="flex flex-col gap-2 mt-2">
@@ -178,12 +190,14 @@ export default function DashboardPage() {
             <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
               Aktivitas Absensi Terbaru
             </h4>
-            <Link
-              href="/history"
-              className="text-xs font-semibold text-sky-400 hover:underline"
-            >
-              Lihat Semua →
-            </Link>
+            {canViewHistory ? (
+              <Link
+                href="/history"
+                className="text-xs font-semibold text-sky-400 hover:underline"
+              >
+                Lihat Semua →
+              </Link>
+            ) : null}
           </div>
 
           {isLoading ? (

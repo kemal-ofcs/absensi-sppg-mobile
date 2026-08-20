@@ -1376,7 +1376,6 @@ mod tests {
     use reqwest::Client;
     use serde_json::json;
     use tempfile::tempdir;
-    use url::Url;
 
     use super::{storage, submit_at, MobileState, LocalMoment};
 
@@ -1408,11 +1407,11 @@ mod tests {
             )
             .expect("fixture seed");
         let state = MobileState {
-            api_base_url: std::sync::RwLock::new(Url::parse("http://localhost:3000").expect("url")),
             server_origin: std::sync::RwLock::new("http://localhost:3000".into()),
             offline_max_age_hours: 24,
             data_dir: directory.path().to_path_buf(),
             http: Client::new(),
+            turso_config: std::sync::RwLock::new(None),
             session: Mutex::new(None),
             vault_lock: Mutex::new(()),
         };

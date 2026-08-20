@@ -5,19 +5,30 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
+import { hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
-import type { GeofenceSettings } from "@/lib/gateways/geofence";
 import {
+  type GeofenceSettings,
   getGeofenceSettings,
   saveGeofenceSettings,
 } from "@/lib/gateways/geofence";
+import {
+  clearTursoConfig,
+  getTursoUrl,
+  saveTursoConfig,
+  type TursoConnectionStatus,
+  testTursoConnection,
+} from "@/lib/gateways/turso-config";
 import { useOnlineStatus } from "@/lib/hooks/useOnlineStatus";
 
 export default function SettingsPage() {
-  const { user, logout, isAuthenticated, isLoading: authLoading } = useAuth();
+  const { user, isAuthenticated, isLoading: authLoading, logout } = useAuth();
   const router = useRouter();
   const isOnline = useOnlineStatus();
+  const canManageGeofence = Boolean(
+    user?.isSuperadmin || hasPermission(user, "branding.manage"),
+  );
 
   const [geofence, setGeofence] = useState<GeofenceSettings>({
     enabled: false,
@@ -27,6 +38,14 @@ export default function SettingsPage() {
   });
   const [geofenceLoading, setGeofenceLoading] = useState(true);
   const [saveMessage, setSaveMessage] = useState("");
+
+  const [tursoUrl, setTursoUrl] = useState("");
+  const [tursoToken, setTursoToken] = useState("");
+  const [showTursoToken, setShowTursoToken] = useState(false);
+  const [tursoBusy, setTursoBusy] = useState(false);
+  const [tursoTesting, setTursoTesting] = useState(false);
+  const [tursoTestStatus, setTursoTestStatus] =
+    useState<TursoConnectionStatus | null>(null);
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
@@ -46,13 +65,22 @@ export default function SettingsPage() {
         if (!cancelled) setGeofenceLoading(false);
       }
     }
-    if (isAuthenticated) {
+    if (isAuthenticated && canManageGeofence) {
       void loadGeofence();
+    } else {
+      setGeofenceLoading(false);
+    }
+    if (isAuthenticated && user?.isSuperadmin) {
+      getTursoUrl()
+        .then((url) => {
+          if (!cancelled && url) setTursoUrl(url);
+        })
+        .catch(() => undefined);
     }
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated]);
+  }, [isAuthenticated, canManageGeofence, user?.isSuperadmin]);
 
   const handleLogout = async () => {
     triggerHaptic("warning");
@@ -77,6 +105,91 @@ export default function SettingsPage() {
       setTimeout(() => setSaveMessage(""), 3000);
     } catch {
       triggerHaptic("error");
+    }
+  };
+
+  const handleTursoSave = async () => {
+    if (!tursoUrl.trim()) {
+      setSaveMessage("URL database cloud Turso tidak boleh kosong.");
+      setTimeout(() => setSaveMessage(""), 3000);
+      return;
+    }
+    setTursoBusy(true);
+    triggerHaptic("light");
+    try {
+      await saveTursoConfig(tursoUrl.trim(), tursoToken.trim());
+      triggerHaptic("success");
+      setSaveMessage(
+        "Konfigurasi database cloud Turso berhasil disimpan ke Vault!",
+      );
+      const status = await testTursoConnection(
+        tursoUrl.trim(),
+        tursoToken.trim(),
+      );
+      setTursoTestStatus(status);
+      setTimeout(() => setSaveMessage(""), 4000);
+    } catch (error) {
+      triggerHaptic("error");
+      setSaveMessage(
+        error instanceof Error
+          ? error.message
+          : "Gagal menyimpan konfigurasi Turso.",
+      );
+      setTimeout(() => setSaveMessage(""), 4000);
+    } finally {
+      setTursoBusy(false);
+    }
+  };
+
+  const handleTursoTest = async () => {
+    setTursoTesting(true);
+    triggerHaptic("light");
+    try {
+      const status = await testTursoConnection(
+        tursoUrl.trim() || undefined,
+        tursoToken.trim() || undefined,
+      );
+      setTursoTestStatus(status);
+      if (status.connected) {
+        triggerHaptic("success");
+        setSaveMessage(
+          `Koneksi Berhasil! Latensi: ${status.latency_ms ?? 0} ms`,
+        );
+      } else {
+        triggerHaptic("error");
+        setSaveMessage(`Koneksi gagal: ${status.error_message || "Error"}`);
+      }
+      setTimeout(() => setSaveMessage(""), 4000);
+    } catch (error) {
+      triggerHaptic("error");
+      setSaveMessage(
+        error instanceof Error ? error.message : "Gagal menguji koneksi Turso.",
+      );
+      setTimeout(() => setSaveMessage(""), 4000);
+    } finally {
+      setTursoTesting(false);
+    }
+  };
+
+  const handleTursoClear = async () => {
+    if (
+      !confirm("Hapus konfigurasi database cloud Turso dari perangkat ini?")
+    ) {
+      return;
+    }
+    setTursoBusy(true);
+    triggerHaptic("warning");
+    try {
+      await clearTursoConfig();
+      setTursoUrl("");
+      setTursoToken("");
+      setTursoTestStatus(null);
+      setSaveMessage("Konfigurasi database cloud Turso berhasil direset.");
+      setTimeout(() => setSaveMessage(""), 3000);
+    } catch (_error) {
+      setSaveMessage("Gagal mereset konfigurasi.");
+    } finally {
+      setTursoBusy(false);
     }
   };
 
@@ -122,6 +235,129 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        {/* Global Toast Message */}
+        {saveMessage && (
+          <div className="rounded-2xl border border-sky-500/30 bg-sky-950/60 p-3 text-xs font-bold text-sky-200 shadow-lg">
+            {saveMessage}
+          </div>
+        )}
+
+        {/* Superadmin Turso Database Cloud Section */}
+        {user?.isSuperadmin ? (
+          <div className="rounded-3xl border border-cyan-400/20 bg-gradient-to-br from-cyan-950/20 via-slate-900/90 to-slate-900/95 p-4 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-xl bg-cyan-400/20 text-cyan-300">
+                  <Icon name="database" className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Database Cloud (Turso)
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Koneksi langsung LibSQL HTTP Pipeline
+                  </p>
+                </div>
+              </div>
+              <span className="rounded-md bg-cyan-400/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-cyan-300 border border-cyan-400/20">
+                Superadmin
+              </span>
+            </div>
+
+            <div className="space-y-3 pt-1">
+              <div>
+                <label
+                  htmlFor="turso-url-input"
+                  className="block text-[11px] font-bold text-slate-300 mb-1"
+                >
+                  URL Database Cloud
+                </label>
+                <input
+                  id="turso-url-input"
+                  type="text"
+                  value={tursoUrl}
+                  onChange={(e) => setTursoUrl(e.target.value)}
+                  placeholder="libsql://db-org.turso.io"
+                  className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-xs font-mono text-white outline-none focus:border-cyan-400"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="turso-token-input"
+                  className="block text-[11px] font-bold text-slate-300 mb-1"
+                >
+                  Auth Token Database
+                </label>
+                <div className="relative">
+                  <input
+                    id="turso-token-input"
+                    type={showTursoToken ? "text" : "password"}
+                    value={tursoToken}
+                    onChange={(e) => setTursoToken(e.target.value)}
+                    placeholder={
+                      tursoUrl
+                        ? "•••••••••••••••• (Tersimpan di vault)"
+                        : "eyJhbGciOiJFZERT..."
+                    }
+                    className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 pr-16 text-xs font-mono text-white outline-none focus:border-cyan-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowTursoToken((prev) => !prev)}
+                    className="absolute right-1.5 top-1.5 rounded-lg bg-white/5 px-2 py-1 text-[10px] font-bold text-slate-300"
+                  >
+                    {showTursoToken ? "Tutup" : "Lihat"}
+                  </button>
+                </div>
+              </div>
+
+              {tursoTestStatus ? (
+                <div
+                  className={`rounded-xl border p-2.5 text-xs font-semibold ${
+                    tursoTestStatus.connected
+                      ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+                      : "border-rose-500/20 bg-rose-500/10 text-rose-300"
+                  }`}
+                >
+                  {tursoTestStatus.connected
+                    ? `Terhubung ke Turso (Latensi: ${tursoTestStatus.latency_ms ?? 0} ms)`
+                    : `Gagal terhubung: ${tursoTestStatus.error_message || "Periksa token/URL"}`}
+                </div>
+              ) : null}
+
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleTursoSave}
+                  disabled={tursoBusy || tursoTesting}
+                  className="flex-1 min-h-10 rounded-xl bg-cyan-400 px-3 text-xs font-black text-slate-950 shadow-md active:scale-95 transition disabled:opacity-50"
+                >
+                  {tursoBusy ? "Menyimpan..." : "Simpan ke Vault"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleTursoTest}
+                  disabled={tursoBusy || tursoTesting}
+                  className="min-h-10 rounded-xl border border-cyan-400/40 bg-cyan-400/10 px-3 text-xs font-bold text-cyan-200 active:scale-95 transition disabled:opacity-50"
+                >
+                  {tursoTesting ? "Menguji..." : "Uji Koneksi"}
+                </button>
+                {tursoUrl ? (
+                  <button
+                    type="button"
+                    onClick={handleTursoClear}
+                    disabled={tursoBusy || tursoTesting}
+                    className="min-h-10 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 text-xs font-bold text-rose-300 active:scale-95 transition disabled:opacity-50"
+                  >
+                    Reset
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         {/* Pusat Sinkronisasi Shortcut */}
         <div className="rounded-3xl border border-sky-500/20 bg-gradient-to-br from-sky-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
           <div className="flex items-center justify-between gap-3 mb-2">
@@ -159,20 +395,26 @@ export default function SettingsPage() {
                 Validasi radius lokasi scan terhadap titik koordinat kantor
               </p>
             </div>
-            <button
-              type="button"
-              onClick={handleToggleGeofence}
-              disabled={geofenceLoading}
-              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                geofence.enabled ? "bg-sky-500" : "bg-slate-700"
-              }`}
-            >
-              <span
-                className={`pointer-events-none inline-block size-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
-                  geofence.enabled ? "translate-x-5" : "translate-x-0"
+            {canManageGeofence ? (
+              <button
+                type="button"
+                onClick={handleToggleGeofence}
+                disabled={geofenceLoading}
+                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                  geofence.enabled ? "bg-sky-500" : "bg-slate-700"
                 }`}
-              />
-            </button>
+              >
+                <span
+                  className={`pointer-events-none inline-block size-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                    geofence.enabled ? "translate-x-5" : "translate-x-0"
+                  }`}
+                />
+              </button>
+            ) : (
+              <span className="rounded-full border border-white/10 bg-slate-950 px-2.5 py-1 text-[10px] font-bold text-slate-500">
+                Hanya Superadmin
+              </span>
+            )}
           </div>
 
           {saveMessage && (

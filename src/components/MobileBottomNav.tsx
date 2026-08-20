@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Icon, type IconName } from "@/components/ui/Icon";
-import { canAccessArea } from "@/lib/auth/access";
+import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
 
@@ -18,33 +18,38 @@ export function MobileBottomNav() {
   const pathname = usePathname();
   const { user } = useAuth();
 
-  const isOperational = canAccessArea(user, "operational");
+  const canHome = canAccessArea(user, "home");
+  const canScanner = canAccessArea(user, "scanner");
+  const canHistory = canAccessArea(user, "history");
+  const canOperational = canAccessArea(user, "operational");
+  const canSync = hasPermission(user, "sync.view");
 
-  const navItems: NavItem[] = isOperational
-    ? [
-        { href: "/dashboard", icon: "dashboard", label: "Beranda" },
-        { href: "/history", icon: "clock", label: "Riwayat" },
-        {
-          href: "/scanner",
-          icon: "scanner",
-          label: "Scanner",
-          isElevated: true,
-        },
-        { href: "/operational", icon: "tools", label: "Operasional" },
-        { href: "/settings", icon: "settings", label: "Akun" },
-      ]
-    : [
-        { href: "/dashboard", icon: "dashboard", label: "Beranda" },
-        { href: "/history", icon: "clock", label: "Riwayat" },
-        {
-          href: "/scanner",
-          icon: "scanner",
-          label: "Scanner",
-          isElevated: true,
-        },
-        { href: "/sync", icon: "sync", label: "Sync" },
-        { href: "/settings", icon: "settings", label: "Akun" },
-      ];
+  const navItems: NavItem[] = [];
+
+  if (canHome) {
+    navItems.push({ href: "/dashboard", icon: "dashboard", label: "Beranda" });
+  }
+  if (canHistory) {
+    navItems.push({ href: "/history", icon: "clock", label: "Riwayat" });
+  }
+  if (canScanner) {
+    navItems.push({
+      href: "/scanner",
+      icon: "scanner",
+      label: "Scanner",
+      isElevated: true,
+    });
+  }
+  if (canOperational) {
+    navItems.push({
+      href: "/operational",
+      icon: "tools",
+      label: "Operasional",
+    });
+  } else if (canSync) {
+    navItems.push({ href: "/sync", icon: "sync", label: "Sync" });
+  }
+  navItems.push({ href: "/settings", icon: "settings", label: "Akun" });
 
   return (
     <nav

@@ -308,8 +308,13 @@ fn row_has_unsynced_change(
     if definition.domain == "shift" {
         let code = entity_key(row, "kode_shift");
         if !code.is_empty()
-            && has_unsynced_change(transaction, definition.domain, &format!("kode:{code}"))?
+            && (has_unsynced_change(transaction, definition.domain, &format!("kode:{code}"))?
+                || has_unsynced_change(transaction, definition.domain, &code)?)
         {
+            return Ok(true);
+        }
+        let shift_id = entity_key(row, "id_shift");
+        if !shift_id.is_empty() && has_unsynced_change(transaction, definition.domain, &shift_id)? {
             return Ok(true);
         }
     }
@@ -470,6 +475,20 @@ fn apply_table(
         if key.is_empty() || row_has_unsynced_change(transaction, definition, row, &key)? {
             continue;
         }
+
+        if definition.domain == "scan-log" {
+            let ts = entity_key(row, "timestamp_scan");
+            let emp = entity_key(row, "id_karyawan");
+            let kind = entity_key(row, "jenis_scan");
+            let tgl = entity_key(row, "tanggal_kerja");
+            let ref_id = entity_key(row, "id_referensi");
+            // Bersihkan baris log scan lokal sementara (id_log < 0) yang cocok sebelum memasukkan baris server
+            let _ = transaction.execute(
+                "DELETE FROM log_scan WHERE id_log < 0 AND tanggal_kerja = ? AND id_karyawan = ? AND (jenis_scan = ? OR (id_referensi = ? AND id_referensi != '') OR timestamp_scan = ?);",
+                params![tgl, emp, kind, ref_id, ts],
+            );
+        }
+
         let values = definition
             .columns
             .iter()
@@ -633,7 +652,7 @@ pub fn enqueue(
 }
 
 pub fn apply_snapshot(state: &MobileState, payload: &Value) -> Result<(), CommandError> {
-    let snapshot = payload.get("snapshot").ok_or_else(CommandError::internal)?;
+    let snapshot = payload.get("snapshot").unwrap_or(payload);
     let revision = snapshot
         .get("revision")
         .and_then(Value::as_i64)
@@ -657,6 +676,23 @@ pub fn apply_snapshot(state: &MobileState, payload: &Value) -> Result<(), Comman
     for definition in SNAPSHOT_TABLES {
         apply_table(&transaction, snapshot, definition, revision)?;
     }
+
+    // Bersihkan temporary local log_scan (id_log < 0) jika sudah ada baris server permanen yang cocok
+    let _ = transaction.execute(
+        r#"
+        DELETE FROM log_scan
+        WHERE id_log < 0
+          AND EXISTS (
+            SELECT 1 FROM log_scan s2
+            WHERE s2.id_log > 0
+              AND s2.tanggal_kerja = log_scan.tanggal_kerja
+              AND s2.id_karyawan = log_scan.id_karyawan
+              AND s2.jenis_scan = log_scan.jenis_scan
+          );
+        "#,
+        [],
+    );
+
     transaction
         .execute(
             r#"
@@ -676,15 +712,33 @@ pub async fn pull_snapshot(
     state: &MobileState,
     token: &str,
 ) -> Result<MobileSyncStatus, CommandError> {
-    let payload = remote::authorized_json(
-        state,
-        reqwest::Method::POST,
-        "/api/sync/snapshot",
-        None,
-        token,
-    )
-    .await?;
-    apply_snapshot(state, &payload)?;
+    if let Ok(turso) = state.get_turso_client() {
+        let (last_rev, _) = {
+            let connection = storage::database(&state.data_dir)?;
+            connection
+                .query_row(
+                    "SELECT last_revision, updated_at FROM desktop_sync_cursor WHERE domain = 'operational';",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+                )
+                .unwrap_or((0, None))
+        };
+        let payload = turso.pull_snapshot(last_rev).await?;
+        apply_snapshot(state, &payload)?;
+        return status(state);
+    }
+
+    if !token.is_empty() {
+        let payload = remote::authorized_json(
+            state,
+            reqwest::Method::POST,
+            "/api/sync/snapshot",
+            None,
+            token,
+        )
+        .await?;
+        apply_snapshot(state, &payload)?;
+    }
     status(state)
 }
 
@@ -1106,47 +1160,85 @@ fn apply_push_results(
 }
 
 pub async fn push_outbox(state: &MobileState, token: &str) -> Result<(), CommandError> {
-    loop {
-        let (client_id, events) = pending_events(state)?;
-        if events.is_empty() {
-            return Ok(());
-        }
-        let event_ids = events
-            .iter()
-            .filter_map(|event| event.get("eventId").and_then(Value::as_str))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let response = remote::authorized_json(
-            state,
-            reqwest::Method::POST,
-            "/api/sync/push",
-            Some(json!({ "clientId": client_id, "events": events })),
-            token,
-        )
-        .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                mark_batch_failed(state, &event_ids, &error.message);
+    if let Ok(turso) = state.get_turso_client() {
+        loop {
+            let (_client_id, events) = pending_events(state)?;
+            if events.is_empty() {
+                return Ok(());
+            }
+            let event_ids = events
+                .iter()
+                .filter_map(|event| event.get("eventId").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+
+            let results = match turso.push_events(&events).await {
+                Ok(res) => res,
+                Err(error) => {
+                    mark_batch_failed(state, &event_ids, &error.message);
+                    return Err(error);
+                }
+            };
+
+            if let Err(error) = apply_push_results(state, &event_ids, &results) {
+                mark_batch_failed(
+                    state,
+                    &event_ids,
+                    "Respons database Turso tidak lengkap atau tidak valid.",
+                );
                 return Err(error);
             }
-        };
-        let results = response
-            .get("results")
-            .and_then(Value::as_array)
-            .ok_or_else(CommandError::internal)?;
-        if let Err(error) = apply_push_results(state, &event_ids, results) {
-            mark_batch_failed(
-                state,
-                &event_ids,
-                "Respons server tidak lengkap atau tidak valid.",
-            );
-            return Err(error);
-        }
-        if event_ids.len() < 50 {
-            return Ok(());
+            if event_ids.len() < 50 {
+                return Ok(());
+            }
         }
     }
+
+    if !token.is_empty() {
+        loop {
+            let (client_id, events) = pending_events(state)?;
+            if events.is_empty() {
+                return Ok(());
+            }
+            let event_ids = events
+                .iter()
+                .filter_map(|event| event.get("eventId").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let response = remote::authorized_json(
+                state,
+                reqwest::Method::POST,
+                "/api/sync/push",
+                Some(json!({ "clientId": client_id, "events": events })),
+                token,
+            )
+            .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    mark_batch_failed(state, &event_ids, &error.message);
+                    return Err(error);
+                }
+            };
+            let results = response
+                .get("results")
+                .and_then(Value::as_array)
+                .ok_or_else(CommandError::internal)?;
+            if let Err(error) = apply_push_results(state, &event_ids, results) {
+                mark_batch_failed(
+                    state,
+                    &event_ids,
+                    "Respons server tidak lengkap atau tidak valid.",
+                );
+                return Err(error);
+            }
+            if event_ids.len() < 50 {
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn synchronize(
@@ -1323,7 +1415,6 @@ mod tests {
     use reqwest::Client;
     use serde_json::{json, Value};
     use tempfile::tempdir;
-    use url::Url;
 
     use super::{
         apply_push_results, apply_snapshot, enqueue, ensure_client_id, pending_events, storage,
@@ -1334,11 +1425,11 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         storage::initialize(directory.path()).expect("local schema");
         let state = MobileState {
-            api_base_url: std::sync::RwLock::new(Url::parse("http://localhost:3000").expect("url")),
             server_origin: std::sync::RwLock::new("http://localhost:3000".into()),
             offline_max_age_hours: 24,
             data_dir: directory.path().to_path_buf(),
             http: Client::new(),
+            turso_config: std::sync::RwLock::new(None),
             session: Mutex::new(None),
             vault_lock: Mutex::new(()),
         };
