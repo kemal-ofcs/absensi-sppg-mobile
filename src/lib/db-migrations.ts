@@ -11,6 +11,7 @@ const OPERATIONAL_SYNC_MIGRATION_VERSION = 4;
 const OFFLINE_IMPORT_MIGRATION_VERSION = 5;
 const OPERATIONAL_COLUMNS_MIGRATION_VERSION = 6;
 const HOLIDAY_MIGRATION_VERSION = 7;
+const TWO_TIER_SECURITY_MIGRATION_VERSION = 8;
 
 const SYSTEM_ROLES = [
   {
@@ -153,8 +154,28 @@ export async function runDatabaseMigrations(client: Client) {
       base_revision INTEGER,
       server_revision INTEGER,
       actor_operator_id INTEGER NOT NULL,
+      receipt_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL,
       processed_at TEXT NOT NULL
+    );
+  `);
+
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS sync_changelog (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_id TEXT NOT NULL,
+      event_id TEXT UNIQUE NOT NULL,
+      domain TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      entity_key TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS app_bootstrap_state (
+      bootstrap_key TEXT PRIMARY KEY,
+      claimed_at TEXT NOT NULL
     );
   `);
 
@@ -197,6 +218,12 @@ export async function runDatabaseMigrations(client: Client) {
   }
 
   const now = new Date().toISOString();
+
+  if (!(await hasColumn(client, "sync_operation_receipt", "receipt_json"))) {
+    await client.execute(
+      "ALTER TABLE sync_operation_receipt ADD COLUMN receipt_json TEXT NOT NULL DEFAULT '{}';",
+    );
+  }
   for (const role of SYSTEM_ROLES) {
     await client.execute({
       sql: `
@@ -367,6 +394,11 @@ export async function runDatabaseMigrations(client: Client) {
     sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
           VALUES (?, 'holiday-management-foundation', ?);`,
     args: [HOLIDAY_MIGRATION_VERSION, now],
+  });
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (?, 'two-tier-security-and-atomic-sync', ?);`,
+    args: [TWO_TIER_SECURITY_MIGRATION_VERSION, now],
   });
 
   await client.execute(

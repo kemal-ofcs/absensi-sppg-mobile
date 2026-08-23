@@ -3,6 +3,8 @@ use std::{collections::HashMap, env, path::PathBuf};
 const MOBILE_COMMANDS: &[&str] = &[
     "desktop_get_session",
     "desktop_get_runtime_status",
+    "desktop_get_bootstrap_status",
+    "desktop_bootstrap_superadmin",
     "desktop_login",
     "desktop_logout",
     "desktop_get_master_operators",

@@ -8,6 +8,8 @@
     "core:default",
     "allow-desktop-get-session",
     "allow-desktop-get-runtime-status",
+    "allow-desktop-get-bootstrap-status",
+    "allow-desktop-bootstrap-superadmin",
     "allow-desktop-login",
     "allow-desktop-logout",
     "allow-desktop-get-master-operators",

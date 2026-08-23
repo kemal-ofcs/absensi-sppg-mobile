@@ -19,10 +19,7 @@ struct OnlineAccess {
     token: Zeroizing<String>,
 }
 
-fn require_permission(
-    state: &MobileState,
-    permission: &str,
-) -> Result<OperatorUser, CommandError> {
+fn require_permission(state: &MobileState, permission: &str) -> Result<OperatorUser, CommandError> {
     let session = state.session.lock().map_err(|_| CommandError::internal())?;
     let session = session.as_ref().ok_or_else(|| {
         CommandError::new(
@@ -87,6 +84,34 @@ fn clear_expired_session(state: &MobileState, error: &CommandError) {
     }
 }
 
+fn ensure_login_not_locked(state: &MobileState, identifier: &str) -> Result<(), CommandError> {
+    if let Some(seconds) = storage::login_lock_remaining(&state.data_dir, identifier)? {
+        return Err(CommandError::new(
+            "LOGIN_RATE_LIMITED",
+            format!(
+                "Terlalu banyak percobaan login. Coba kembali dalam {} menit {} detik.",
+                seconds / 60,
+                seconds % 60
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_login(state: &MobileState, identifier: &str) -> Result<(), CommandError> {
+    if let Some(seconds) = storage::record_failed_login(&state.data_dir, identifier)? {
+        return Err(CommandError::new(
+            "LOGIN_RATE_LIMITED",
+            format!(
+                "Terlalu banyak percobaan login. Coba kembali dalam {} menit {} detik.",
+                seconds / 60,
+                seconds % 60
+            ),
+        ));
+    }
+    Ok(())
+}
+
 async fn secured_api(
     state: &MobileState,
     permission: &str,
@@ -125,10 +150,8 @@ pub fn desktop_get_runtime_status(
 }
 
 #[tauri::command]
-pub fn desktop_get_server_url(
-    state: State<'_, MobileState>,
-) -> Result<String, CommandError> {
-    Ok(state.api_base_url().to_string())
+pub fn desktop_get_server_url(state: State<'_, MobileState>) -> Result<String, CommandError> {
+    Ok(state.api_base_url()?.to_string())
 }
 
 #[tauri::command]
@@ -139,6 +162,67 @@ pub fn desktop_set_server_url(
     state.set_server_url(&url)
 }
 
+#[tauri::command]
+pub async fn desktop_get_bootstrap_status(
+    state: State<'_, MobileState>,
+) -> Result<turso::BootstrapStatus, CommandError> {
+    match state.get_turso_client() {
+        Ok(client) => client.bootstrap_status().await,
+        Err(error) if error.code == "TURSO_NOT_CONFIGURED" => Ok(turso::BootstrapStatus {
+            configured: false,
+            required: true,
+            server_origin: String::new(),
+        }),
+        Err(error) => Err(error),
+    }
+}
+
+#[tauri::command]
+pub async fn desktop_bootstrap_superadmin(
+    state: State<'_, MobileState>,
+    draft: turso::BootstrapSuperadminDraft,
+    database_url: Option<String>,
+    auth_token: Option<String>,
+) -> Result<(), CommandError> {
+    if state
+        .session
+        .lock()
+        .map_err(|_| CommandError::internal())?
+        .is_some()
+    {
+        return Err(CommandError::new(
+            "TURSO_BOOTSTRAP_CLOSED",
+            "Bootstrap hanya tersedia sebelum sesi pengguna aktif.",
+        ));
+    }
+
+    match state.get_turso_client() {
+        Ok(client) => client.bootstrap_superadmin(draft).await?,
+        Err(error) if error.code == "TURSO_NOT_CONFIGURED" => {
+            let url = database_url.unwrap_or_default();
+            let token = Zeroizing::new(auth_token.unwrap_or_default());
+            if url.trim().is_empty() || token.trim().is_empty() {
+                return Err(CommandError::new(
+                    "TURSO_NOT_CONFIGURED",
+                    "URL dan Auth Token Turso wajib diisi untuk provisioning pertama.",
+                ));
+            }
+            let config = turso::TursoConfig {
+                database_url: url.trim().to_owned(),
+                auth_token: token.to_string(),
+            };
+            let client = turso::TursoClient::from_config(&config, state.http.clone())?;
+            let status = client.bootstrap_status().await?;
+            if status.required {
+                client.bootstrap_superadmin(draft).await?;
+            }
+            state.set_turso_config(&config.database_url, &config.auth_token)?;
+        }
+        Err(error) => return Err(error),
+    }
+    storage::audit(&state.data_dir, None, "bootstrap-superadmin-success", None);
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn desktop_login(
@@ -153,12 +237,14 @@ pub async fn desktop_login(
             "Username atau password tidak sesuai.",
         ));
     }
+    ensure_login_not_locked(&state, &identifier)?;
     let password = Zeroizing::new(password);
 
     // 1. Coba login online via Turso jika Turso Client tersedia
     if let Ok(turso) = state.get_turso_client() {
         match turso.authenticate_operator(&identifier, &password).await {
             Ok(operator) => {
+                storage::clear_login_failures(&state.data_dir, &identifier)?;
                 let provisioned = secrets::provision(&state, operator.clone(), &password);
                 let (offline_ready, offline_valid_until, mut message): (
                     bool,
@@ -194,11 +280,12 @@ pub async fn desktop_login(
                     None,
                 );
 
-                *state.session.lock().map_err(|_| CommandError::internal())? = Some(MobileSession {
-                    operator: operator.clone(),
-                    token: Some(Zeroizing::new("turso-direct-session".into())),
-                    mode: SessionMode::Online,
-                });
+                *state.session.lock().map_err(|_| CommandError::internal())? =
+                    Some(MobileSession {
+                        operator: operator.clone(),
+                        token: Some(Zeroizing::new("turso-direct-session".into())),
+                        mode: SessionMode::Online,
+                    });
 
                 return Ok(MobileLoginResult {
                     sukses: true,
@@ -216,6 +303,7 @@ pub async fn desktop_login(
                     "login-online-rejected",
                     Some(&err.code),
                 );
+                reject_login(&state, &identifier)?;
                 return Err(err);
             }
             Err(_) => {
@@ -227,6 +315,7 @@ pub async fn desktop_login(
     // 2. Coba login remote HTTP legacy jika ada server URL
     match remote::login(&state, &identifier, &password).await {
         Ok(login) => {
+            storage::clear_login_failures(&state.data_dir, &identifier)?;
             let provisioned = secrets::provision(&state, login.operator.clone(), &password);
             let (offline_ready, offline_valid_until, message) = match provisioned {
                 Ok(credential) => (
@@ -273,6 +362,7 @@ pub async fn desktop_login(
                 "login-online-rejected",
                 Some(&error.code),
             );
+            reject_login(&state, &identifier)?;
             return Err(error);
         }
         Err(RemoteLoginError::Unavailable) => {
@@ -281,16 +371,25 @@ pub async fn desktop_login(
     }
 
     // 3. Fallback offline credential snapshot
-    let credential = secrets::load_offline(&state, &identifier, &password).map_err(|err| {
-        if err.code == "OFFLINE_NOT_PROVISIONED" {
-            CommandError::new(
-                "DESKTOP_ONLINE_REQUIRED",
-                "Tidak dapat terhubung ke database cloud (pastikan URL dan internet aktif). Login pertama kali pada perangkat memerlukan koneksi online.",
-            )
-        } else {
-            err
+    let credential = match secrets::load_offline(&state, &identifier, &password) {
+        Ok(credential) => credential,
+        Err(error) => {
+            if matches!(
+                error.code,
+                "OFFLINE_CREDENTIAL_INVALID" | "OFFLINE_SNAPSHOT_INVALID"
+            ) {
+                reject_login(&state, &identifier)?;
+            }
+            if error.code == "OFFLINE_NOT_PROVISIONED" {
+                return Err(CommandError::new(
+                    "DESKTOP_ONLINE_REQUIRED",
+                    "Tidak dapat terhubung ke database cloud (pastikan URL dan internet aktif). Login pertama kali pada perangkat memerlukan koneksi online.",
+                ));
+            }
+            return Err(error);
         }
-    })?;
+    };
+    storage::clear_login_failures(&state.data_dir, &identifier)?;
     storage::audit(
         &state.data_dir,
         Some(credential.operator.id),
@@ -304,7 +403,8 @@ pub async fn desktop_login(
     });
     Ok(MobileLoginResult {
         sukses: true,
-        pesan: "Database cloud tidak terjangkau. Login memakai snapshot offline tervalidasi.".into(),
+        pesan: "Database cloud tidak terjangkau. Login memakai snapshot offline tervalidasi."
+            .into(),
         operator: credential.operator,
         mode: SessionMode::Offline,
         offline_ready: true,
@@ -535,7 +635,6 @@ pub fn desktop_import_employees(
     operational::import_employees(&state, &drafts)
 }
 
-
 #[tauri::command]
 pub fn desktop_update_employee(
     state: State<'_, MobileState>,
@@ -749,9 +848,7 @@ pub fn desktop_update_id_card(
 }
 
 #[tauri::command]
-pub fn desktop_get_geofence_settings(
-    state: State<'_, MobileState>,
-) -> Result<Value, CommandError> {
+pub fn desktop_get_geofence_settings(state: State<'_, MobileState>) -> Result<Value, CommandError> {
     let operator = require_permission(&state, "branding.manage")?;
     if !operator.is_superadmin {
         return Err(CommandError::new(
@@ -776,21 +873,11 @@ pub async fn desktop_update_geofence_settings(
     }
     let data = settings.get("data").cloned().unwrap_or(settings);
     operational::save_geofence_settings(&state, &data)?;
-    if let Ok(turso) = state.get_turso_client() {
-        let _ = turso
-            .query_one(
-                "INSERT INTO setting_gex_system (key, value) VALUES ('geofence_settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
-                vec![json!(data.to_string())],
-            )
-            .await;
-    }
     Ok(data)
 }
 
 #[tauri::command]
-pub fn desktop_get_scanner_settings(
-    state: State<'_, MobileState>,
-) -> Result<Value, CommandError> {
+pub fn desktop_get_scanner_settings(state: State<'_, MobileState>) -> Result<Value, CommandError> {
     let operator = require_permission(&state, "branding.manage")?;
     if !operator.is_superadmin {
         return Err(CommandError::new(
@@ -815,14 +902,6 @@ pub async fn desktop_update_scanner_settings(
     }
     let data = settings.get("data").cloned().unwrap_or(settings);
     operational::save_scanner_settings(&state, &data)?;
-    if let Ok(turso) = state.get_turso_client() {
-        let _ = turso
-            .query_one(
-                "INSERT INTO setting_gex_system (key, value) VALUES ('scanner_safety_settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
-                vec![json!(data.to_string())],
-            )
-            .await;
-    }
     Ok(data)
 }
 
@@ -930,10 +1009,7 @@ pub fn desktop_clear_failed_sync(
 }
 
 #[tauri::command]
-pub fn desktop_save_file(
-    filename: String,
-    base64_data: String,
-) -> Result<Value, CommandError> {
+pub fn desktop_save_file(filename: String, base64_data: String) -> Result<Value, CommandError> {
     operational::save_desktop_file(&filename, &base64_data)
 }
 
@@ -1093,9 +1169,7 @@ pub async fn desktop_test_turso_connection(
 }
 
 #[tauri::command]
-pub fn desktop_clear_turso_config(
-    state: State<'_, MobileState>,
-) -> Result<(), CommandError> {
+pub fn desktop_clear_turso_config(state: State<'_, MobileState>) -> Result<(), CommandError> {
     let operator = require_permission(&state, "settings.manage")?;
     if !operator.is_superadmin {
         return Err(CommandError::new(
@@ -1104,11 +1178,11 @@ pub fn desktop_clear_turso_config(
         ));
     }
     secrets::clear_turso_config(&state)?;
-    let _ = storage::set_system_setting(&state.data_dir, "turso_database_url", "");
-    let _ = storage::set_system_setting(&state.data_dir, "turso_auth_token", "");
-    *state.turso_config.write().unwrap() = None;
+    storage::set_system_setting(&state.data_dir, "turso_database_url", "")?;
+    storage::set_system_setting(&state.data_dir, "turso_auth_token", "")?;
+    *state
+        .turso_config
+        .write()
+        .map_err(|_| CommandError::internal())? = None;
     Ok(())
 }
-
-
-

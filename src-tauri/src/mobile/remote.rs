@@ -16,7 +16,7 @@ pub enum RemoteLoginError {
 }
 
 fn endpoint(state: &MobileState, path: &str) -> Result<url::Url, CommandError> {
-    state.api_base_url().join(path).map_err(|_| {
+    state.api_base_url()?.join(path).map_err(|_| {
         CommandError::new(
             "MOBILE_CONFIG_INVALID",
             "Endpoint server Mobile tidak valid.",

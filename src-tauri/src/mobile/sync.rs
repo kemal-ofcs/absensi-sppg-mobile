@@ -119,6 +119,50 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         delete_missing: false,
     },
     SnapshotTable {
+        payload_key: "companyProfiles",
+        domain: "company-profile",
+        table: "company_profile",
+        columns: &[
+            "id",
+            "company_name",
+            "branch_name",
+            "logo_url",
+            "signature_url",
+            "address",
+            "phone",
+            "email",
+            "website",
+            "leader_name",
+            "leader_title",
+            "leader_nip",
+            "card_terms",
+            "timezone",
+            "updated_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "idCardTemplates",
+        domain: "id-card-template",
+        table: "id_card_template",
+        columns: &[
+            "id",
+            "name",
+            "orientation",
+            "front_bg_url",
+            "back_bg_url",
+            "elements_json",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
         payload_key: "backups",
         domain: "backup",
         table: "backup_karyawan",
@@ -228,7 +272,7 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
     },
     SnapshotTable {
         payload_key: "scanLogs",
-        domain: "scan-log",
+        domain: "log-scan",
         table: "log_scan",
         columns: &[
             "id_log",
@@ -253,6 +297,41 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         delete_missing: false,
     },
 ];
+
+const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
+    ("attendance", "create"),
+    ("attendance", "delete"),
+    ("attendance", "scan"),
+    ("attendance", "update"),
+    ("backup", "cancel"),
+    ("backup", "create"),
+    ("company-profile", "update"),
+    ("correction", "create"),
+    ("correction", "delete"),
+    ("employee", "create"),
+    ("employee", "status"),
+    ("employee", "token"),
+    ("employee", "update"),
+    ("holiday", "create"),
+    ("holiday", "delete"),
+    ("holiday", "update"),
+    ("id-card", "update"),
+    ("id-card-template", "save"),
+    ("log-scan", "delete"),
+    ("offline-import", "delete"),
+    ("offline-import", "row"),
+    ("setting", "update"),
+    ("setting", "upsert"),
+    ("shift", "create"),
+    ("shift", "delete"),
+    ("shift", "update"),
+];
+
+pub(super) fn is_canonical_sync_route(domain: &str, operation: &str) -> bool {
+    CANONICAL_SYNC_ROUTES
+        .iter()
+        .any(|route| *route == (domain, operation))
+}
 
 fn sql_value(value: Option<&Value>) -> SqlValue {
     match value {
@@ -336,7 +415,7 @@ fn row_has_unsynced_change(
             return Ok(true);
         }
     }
-    if definition.domain == "scan-log" {
+    if definition.domain == "log-scan" {
         let timestamp = entity_key(row, "timestamp_scan");
         let employee_id = entity_key(row, "id_karyawan");
         let scan_type = entity_key(row, "jenis_scan");
@@ -443,7 +522,10 @@ fn apply_table(
     revision: i64,
 ) -> Result<(), CommandError> {
     let empty_vec = Vec::new();
-    let (rows, present) = match snapshot.get(definition.payload_key).and_then(Value::as_array) {
+    let (rows, present) = match snapshot
+        .get(definition.payload_key)
+        .and_then(Value::as_array)
+    {
         Some(arr) => (arr, true),
         None => (&empty_vec, false),
     };
@@ -476,7 +558,7 @@ fn apply_table(
             continue;
         }
 
-        if definition.domain == "scan-log" {
+        if definition.domain == "log-scan" {
             let ts = entity_key(row, "timestamp_scan");
             let emp = entity_key(row, "id_karyawan");
             let kind = entity_key(row, "jenis_scan");
@@ -542,6 +624,16 @@ fn apply_table(
             if snapshot_keys.contains(&key)
                 || has_unsynced_change(transaction, definition.domain, &key)?
             {
+                continue;
+            }
+            let came_from_server = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM desktop_entity_revision WHERE domain = ? AND entity_key = ?);",
+                    params![definition.domain, key],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|_| CommandError::internal())?;
+            if !came_from_server {
                 continue;
             }
             transaction
@@ -625,6 +717,18 @@ pub fn enqueue(
     payload: &Value,
     base_revision: Option<i64>,
 ) -> Result<String, CommandError> {
+    let payload_json = payload.to_string();
+    if !is_canonical_sync_route(domain, operation)
+        || entity_key.trim().is_empty()
+        || entity_key.len() > 160
+        || !payload.is_object()
+        || payload_json.len() > 25_165_824
+    {
+        return Err(CommandError::new(
+            "DESKTOP_SYNC_EVENT_INVALID",
+            format!("Event sinkronisasi tidak valid: {domain}/{operation}."),
+        ));
+    }
     let event_id = new_event_id(client_id, domain, operation);
     let now = storage::now_epoch_seconds();
     transaction
@@ -641,7 +745,7 @@ pub fn enqueue(
                 domain,
                 operation,
                 entity_key,
-                payload.to_string(),
+                payload_json,
                 base_revision,
                 now,
                 now,
@@ -1290,7 +1394,10 @@ pub fn status(state: &MobileState) -> Result<MobileSyncStatus, CommandError> {
             "employees": table_count("master_data"),
             "idCards": table_count("id_card"),
             "shifts": table_count("tbl_shift"),
+            "holidays": table_count("tbl_hari_libur"),
             "settings": table_count("setting_gex_system"),
+            "companyProfiles": table_count("company_profile"),
+            "idCardTemplates": table_count("id_card_template"),
             "backups": table_count("backup_karyawan"),
             "corrections": table_count("koreksi_admin"),
             "imports": table_count("import_offline"),
@@ -1335,19 +1442,19 @@ pub fn retry_failed(state: &MobileState, event_id: Option<&str>) -> Result<(), C
     let connection = storage::database(&state.data_dir)?;
     let changed = if let Some(event_id) = event_id {
         connection.execute(
-            "UPDATE desktop_sync_outbox SET status = 'pending', next_retry_at = NULL, last_error = NULL, updated_at = ? WHERE event_id = ? AND status = 'failed';",
+            "UPDATE desktop_sync_outbox SET status = 'pending', next_retry_at = NULL, last_error = NULL, updated_at = ? WHERE event_id = ? AND status IN ('failed', 'conflict');",
             params![storage::now_epoch_seconds(), event_id],
         )
     } else {
         connection.execute(
-            "UPDATE desktop_sync_outbox SET status = 'pending', next_retry_at = NULL, last_error = NULL, updated_at = ? WHERE status = 'failed';",
+            "UPDATE desktop_sync_outbox SET status = 'pending', next_retry_at = NULL, last_error = NULL, updated_at = ? WHERE status IN ('failed', 'conflict');",
             [storage::now_epoch_seconds()],
         )
     }.map_err(|_| CommandError::internal())?;
     if event_id.is_some() && changed == 0 {
         return Err(CommandError::new(
             "OPERATIONAL_NOT_FOUND",
-            "Event gagal tidak ditemukan.",
+            "Event gagal atau konflik tidak ditemukan.",
         ));
     }
     Ok(())
@@ -1355,7 +1462,9 @@ pub fn retry_failed(state: &MobileState, event_id: Option<&str>) -> Result<(), C
 
 pub fn resolve_conflicts(state: &MobileState, event_id: Option<&str>) -> Result<(), CommandError> {
     let mut connection = storage::database(&state.data_dir)?;
-    let transaction = connection.transaction().map_err(|_| CommandError::internal())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|_| CommandError::internal())?;
     let now = storage::now_epoch_seconds();
     if let Some(event_id) = event_id {
         transaction
@@ -1818,7 +1927,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_requires_monotonic_revision_and_removes_deleted_shift() {
+    fn snapshot_requires_monotonic_revision_and_only_removes_server_tracked_shift() {
         let (_directory, state) = fixture();
         let connection = storage::database(&state.data_dir).expect("local database");
         connection
@@ -1835,14 +1944,32 @@ mod tests {
         let current = snapshot_with_shifts(json!([]));
         apply_snapshot(&state, &current).expect("current snapshot");
         let connection = storage::database(&state.data_dir).expect("local database");
-        let remaining: i64 = connection
+        let untracked_remaining: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM tbl_shift WHERE id_shift = 2;",
                 [],
                 |row| row.get(0),
             )
             .expect("shift count");
-        assert_eq!(remaining, 0);
+        assert_eq!(untracked_remaining, 1);
+        connection
+            .execute(
+                "INSERT INTO desktop_entity_revision (domain, entity_key, server_revision, payload_hash, updated_at) VALUES ('shift', '2', 11, 'tracked', 1);",
+                [],
+            )
+            .expect("tracked server shift");
+        drop(connection);
+
+        apply_snapshot(&state, &current).expect("tracked deletion snapshot");
+        let connection = storage::database(&state.data_dir).expect("local database");
+        let tracked_remaining: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM tbl_shift WHERE id_shift = 2;",
+                [],
+                |row| row.get(0),
+            )
+            .expect("tracked shift count");
+        assert_eq!(tracked_remaining, 0);
         drop(connection);
 
         let mut stale = snapshot_with_shifts(json!([]));
@@ -1993,4 +2120,3 @@ mod tests {
         assert_eq!(failed_count, 0);
     }
 }
-

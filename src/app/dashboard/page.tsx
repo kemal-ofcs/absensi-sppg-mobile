@@ -23,6 +23,7 @@ export default function DashboardPage() {
 
   const canViewMetrics = hasPermission(user, "dashboard.view");
   const canViewHistory = canAccessArea(user, "history");
+  const canViewKaryawan = canAccessArea(user, "karyawan");
 
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [recentScans, setRecentScans] = useState<Record<string, unknown>[]>([]);
@@ -122,6 +123,33 @@ export default function DashboardPage() {
             className="size-5 text-white/80 group-hover:translate-x-1 transition-transform"
           />
         </Link>
+
+        {/* Quick Access: Data Karyawan (hanya jika memiliki izin employees.view) */}
+        {canViewKaryawan ? (
+          <Link
+            href="/karyawan"
+            onClick={() => triggerHaptic("light")}
+            className="group flex items-center justify-between rounded-2xl border border-white/10 bg-slate-900/70 px-4 py-3.5 hover:bg-slate-900/90 active:scale-[0.98] transition-all"
+          >
+            <div className="flex items-center gap-3">
+              <div className="grid size-10 place-items-center rounded-2xl border border-white/10 bg-slate-800/60 text-slate-300">
+                <Icon name="users" className="size-5" />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-white">Data Karyawan</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  {isLoading
+                    ? "Memuat..."
+                    : `${metrics?.totalKaryawan ?? 0} Karyawan Terdaftar`}
+                </p>
+              </div>
+            </div>
+            <Icon
+              name="chevron-right"
+              className="size-4 text-slate-500 group-hover:translate-x-1 transition-transform"
+            />
+          </Link>
+        ) : null}
 
         {/* Statistics Grid (Hanya jika memiliki izin dashboard.view) */}
         {canViewMetrics ? (

@@ -210,10 +210,7 @@ pub fn create_employee(state: &MobileState, draft: &Value) -> Result<Value, Comm
     Ok(json!({ "sukses": true, "id_unik": id, "token_absensi": token }))
 }
 
-pub fn import_employees(
-    state: &MobileState,
-    drafts: &[Value],
-) -> Result<Value, CommandError> {
+pub fn import_employees(state: &MobileState, drafts: &[Value]) -> Result<Value, CommandError> {
     if drafts.is_empty() {
         return Ok(json!({ "sukses": true, "berhasil": 0, "dilewati": 0 }));
     }
@@ -245,7 +242,12 @@ pub fn import_employees(
         let division = text(draft, "divisi");
         let shift_id = integer(draft, "id_shift", 1);
 
-        if id.is_empty() || code.is_empty() || name.len() < 2 || division.is_empty() || shift_id == 0 {
+        if id.is_empty()
+            || code.is_empty()
+            || name.len() < 2
+            || division.is_empty()
+            || shift_id == 0
+        {
             dilewati += 1;
             continue;
         }
@@ -268,10 +270,18 @@ pub fn import_employees(
         let qr_code = format!("{id}|{token}");
 
         let reg_date = text(draft, "tanggal_daftar");
-        let reg_date = if reg_date.is_empty() { &today } else { reg_date };
+        let reg_date = if reg_date.is_empty() {
+            &today
+        } else {
+            reg_date
+        };
 
         let start_date = text(draft, "tanggal_mulai_aktif");
-        let start_date = if start_date.is_empty() { reg_date } else { start_date };
+        let start_date = if start_date.is_empty() {
+            reg_date
+        } else {
+            start_date
+        };
 
         let mut payload = draft.as_object().cloned().unwrap_or_else(Map::new);
         payload.insert("token_absensi".into(), Value::String(token.clone()));
@@ -292,16 +302,32 @@ pub fn import_employees(
                 code,
                 name,
                 division,
-                if text(draft, "jabatan_status").is_empty() { "Staff" } else { text(draft, "jabatan_status") },
+                if text(draft, "jabatan_status").is_empty() {
+                    "Staff"
+                } else {
+                    text(draft, "jabatan_status")
+                },
                 text(draft, "no_hp"),
-                if text(draft, "lp").to_uppercase() == "P" { "P" } else { "L" },
+                if text(draft, "lp").to_uppercase() == "P" {
+                    "P"
+                } else {
+                    "L"
+                },
                 shift_id,
-                if text(draft, "status_aktif") == "Nonaktif" { "Nonaktif" } else { "Aktif" },
+                if text(draft, "status_aktif") == "Nonaktif" {
+                    "Nonaktif"
+                } else {
+                    "Aktif"
+                },
                 reg_date,
                 text(draft, "catatan"),
                 token,
                 qr_code,
-                if text(draft, "jenis_personil").is_empty() { "Pegawai" } else { text(draft, "jenis_personil") },
+                if text(draft, "jenis_personil").is_empty() {
+                    "Pegawai"
+                } else {
+                    text(draft, "jenis_personil")
+                },
                 start_date,
                 text(draft, "tanggal_selesai_aktif"),
             ],
@@ -340,7 +366,6 @@ pub fn import_employees(
 }
 
 pub fn update_employee(
-
     state: &MobileState,
     id: &str,
     draft: &Value,
@@ -608,7 +633,9 @@ fn insert_shift(
         .map(|v| {
             v.as_bool().unwrap_or(false)
                 || v.as_i64().unwrap_or(0) == 1
-                || v.as_str().map(|s| s == "1" || s.eq_ignore_ascii_case("true")).unwrap_or(false)
+                || v.as_str()
+                    .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
         })
         .unwrap_or(false)
     {
@@ -686,7 +713,9 @@ pub fn update_shift(state: &MobileState, id: i64, draft: &Value) -> Result<Value
         .map(|v| {
             v.as_bool().unwrap_or(false)
                 || v.as_i64().unwrap_or(0) == 1
-                || v.as_str().map(|s| s == "1" || s.eq_ignore_ascii_case("true")).unwrap_or(false)
+                || v.as_str()
+                    .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
         })
         .unwrap_or(false)
     {
@@ -770,7 +799,6 @@ pub fn update_shift(state: &MobileState, id: i64, draft: &Value) -> Result<Value
     transaction.commit().map_err(|_| CommandError::internal())?;
     Ok(json!({ "sukses": true }))
 }
-
 
 pub fn delete_shift(state: &MobileState, id: i64) -> Result<Value, CommandError> {
     let client_id = sync::ensure_client_id(state)?;
@@ -881,7 +909,11 @@ pub fn get_geofence_settings(state: &MobileState) -> Result<Value, CommandError>
 }
 
 pub fn save_geofence_settings(state: &MobileState, settings: &Value) -> Result<(), CommandError> {
-    let connection = storage::database(&state.data_dir)?;
+    let client_id = sync::ensure_client_id(state)?;
+    let mut connection = storage::database(&state.data_dir)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|_| CommandError::internal())?;
     let enabled = settings
         .get("enabled")
         .and_then(Value::as_bool)
@@ -904,14 +936,23 @@ pub fn save_geofence_settings(state: &MobileState, settings: &Value) -> Result<(
         ("lng_kantor", longitude.to_string()),
         ("radius_meter", radius.to_string()),
     ] {
-        connection
+        transaction
             .execute(
                 "INSERT INTO setting_gex_system (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
                 params![key, value],
             )
             .map_err(|_| CommandError::internal())?;
+        sync::enqueue(
+            &transaction,
+            &client_id,
+            "setting",
+            "update",
+            key,
+            &json!({ "key": key, "value": value }),
+            base_revision(&transaction, "setting", key),
+        )?;
     }
-    Ok(())
+    transaction.commit().map_err(|_| CommandError::internal())
 }
 
 pub fn get_scanner_settings(state: &MobileState) -> Result<Value, CommandError> {
@@ -946,7 +987,11 @@ pub fn get_scanner_settings(state: &MobileState) -> Result<Value, CommandError> 
 }
 
 pub fn save_scanner_settings(state: &MobileState, settings: &Value) -> Result<(), CommandError> {
-    let connection = storage::database(&state.data_dir)?;
+    let client_id = sync::ensure_client_id(state)?;
+    let mut connection = storage::database(&state.data_dir)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|_| CommandError::internal())?;
     let anti_double_scan = settings
         .get("antiDoubleScanSeconds")
         .and_then(Value::as_i64)
@@ -961,14 +1006,23 @@ pub fn save_scanner_settings(state: &MobileState, settings: &Value) -> Result<()
         ("anti_double_scan_seconds", anti_double_scan.to_string()),
         ("batas_multi_scan_menit", multi_scan.to_string()),
     ] {
-        connection
+        transaction
             .execute(
                 "INSERT INTO setting_gex_system (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
                 params![key, value],
             )
             .map_err(|_| CommandError::internal())?;
+        sync::enqueue(
+            &transaction,
+            &client_id,
+            "setting",
+            "update",
+            key,
+            &json!({ "key": key, "value": value }),
+            base_revision(&transaction, "setting", key),
+        )?;
     }
-    Ok(())
+    transaction.commit().map_err(|_| CommandError::internal())
 }
 
 pub fn update_id_card(state: &MobileState, draft: &Value) -> Result<Value, CommandError> {
@@ -1116,11 +1170,12 @@ pub fn create_holiday(state: &MobileState, draft: &Value) -> Result<Value, Comma
             "Tanggal dan nama hari libur wajib diisi.",
         ));
     }
-    let jenis_libur = if draft.get("jenis_libur").is_some() && !text(draft, "jenis_libur").is_empty() {
-        text(draft, "jenis_libur")
-    } else {
-        "Libur Nasional"
-    };
+    let jenis_libur =
+        if draft.get("jenis_libur").is_some() && !text(draft, "jenis_libur").is_empty() {
+            text(draft, "jenis_libur")
+        } else {
+            "Libur Nasional"
+        };
     let keterangan = draft.get("keterangan").and_then(Value::as_str);
     let status_aktif = if draft
         .get("status_aktif")
@@ -1149,7 +1204,9 @@ pub fn create_holiday(state: &MobileState, draft: &Value) -> Result<Value, Comma
     if existing {
         return Err(CommandError::new(
             "OPERATIONAL_CONFLICT",
-            format!("Tanggal libur {tanggal} sudah terdaftar. Silakan edit jika ingin mengubahnya."),
+            format!(
+                "Tanggal libur {tanggal} sudah terdaftar. Silakan edit jika ingin mengubahnya."
+            ),
         ));
     }
 
@@ -1193,11 +1250,12 @@ pub fn update_holiday(state: &MobileState, id: i64, draft: &Value) -> Result<Val
 
     let tanggal = text(draft, "tanggal");
     let nama_libur = text(draft, "nama_libur");
-    let jenis_libur = if draft.get("jenis_libur").is_some() && !text(draft, "jenis_libur").is_empty() {
-        text(draft, "jenis_libur")
-    } else {
-        "Libur Nasional"
-    };
+    let jenis_libur =
+        if draft.get("jenis_libur").is_some() && !text(draft, "jenis_libur").is_empty() {
+            text(draft, "jenis_libur")
+        } else {
+            "Libur Nasional"
+        };
     let keterangan = draft.get("keterangan").and_then(Value::as_str);
     let status_aktif = if draft
         .get("status_aktif")
@@ -1345,7 +1403,10 @@ fn parse_time_to_minutes(time_str: &str) -> i64 {
     }
 }
 
-pub fn generate_alfa_harian(state: &MobileState, simulated_time: Option<String>) -> Result<Value, CommandError> {
+pub fn generate_alfa_harian(
+    state: &MobileState,
+    simulated_time: Option<String>,
+) -> Result<Value, CommandError> {
     let mut connection = storage::database(&state.data_dir)?;
     let transaction = connection
         .transaction()
@@ -1360,7 +1421,9 @@ pub fn generate_alfa_harian(state: &MobileState, simulated_time: Option<String>)
         )
         .optional()
         .unwrap_or(None);
-    let is_active = is_active_val.map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(true);
+    let is_active = is_active_val
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
     if !is_active {
         return Ok(json!({
             "jumlahAlfaDibuat": 0,
@@ -1434,8 +1497,18 @@ pub fn generate_alfa_harian(state: &MobileState, simulated_time: Option<String>)
     let now_minute = parse_time_to_minutes(&now_moment.time);
 
     let month_names = [
-        "Januari", "Februari", "Maret", "April", "Mei", "Juni",
-        "Juli", "Agustus", "September", "Oktober", "November", "Desember"
+        "Januari",
+        "Februari",
+        "Maret",
+        "April",
+        "Mei",
+        "Juni",
+        "Juli",
+        "Agustus",
+        "September",
+        "Oktober",
+        "November",
+        "Desember",
     ];
 
     for (id_unik, nama, divisi, id_shift) in employees {
@@ -1448,7 +1521,8 @@ pub fn generate_alfa_harian(state: &MobileState, simulated_time: Option<String>)
             .optional()
             .unwrap_or(None);
 
-        let (jam_masuk, jam_pulang, offset_alfa, jam_kerja_normal, kode_shift) = match shift_config {
+        let (jam_masuk, jam_pulang, offset_alfa, jam_kerja_normal, kode_shift) = match shift_config
+        {
             Some(cfg) => cfg,
             None => continue,
         };
@@ -1491,10 +1565,11 @@ pub fn generate_alfa_harian(state: &MobileState, simulated_time: Option<String>)
             shift_out_min - offset_alfa
         };
 
-        let current_timeline_minute = match super::time_policy::days_between(&work_date, &now_moment.date) {
-            Ok(diff) => diff * 1440 + now_minute,
-            Err(_) => now_minute,
-        };
+        let current_timeline_minute =
+            match super::time_policy::days_between(&work_date, &now_moment.date) {
+                Ok(diff) => diff * 1440 + now_minute,
+                Err(_) => now_minute,
+            };
 
         if current_timeline_minute < cutoff_timeline_minute {
             belum_waktunya += 1;
@@ -1528,7 +1603,10 @@ pub fn generate_alfa_harian(state: &MobileState, simulated_time: Option<String>)
             _ => 0,
         };
         let bulan = month_names[month_idx];
-        let tahun = work_date.get(0..4).and_then(|y| y.parse::<i64>().ok()).unwrap_or(2026);
+        let tahun = work_date
+            .get(0..4)
+            .and_then(|y| y.parse::<i64>().ok())
+            .unwrap_or(2026);
 
         transaction
             .execute(
@@ -1646,11 +1724,9 @@ pub fn generate_alfa_harian(state: &MobileState, simulated_time: Option<String>)
 #[allow(dead_code)]
 fn current_iso(connection: &rusqlite::Connection) -> String {
     connection
-        .query_row(
-            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now');",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now');", [], |row| {
+            row.get(0)
+        })
         .unwrap_or_else(|_| "2026-01-01T00:00:00Z".to_string())
 }
 
@@ -1839,7 +1915,11 @@ pub fn default_id_card_elements() -> Value {
 #[allow(dead_code)]
 pub fn get_id_card_template(state: &MobileState, id: &str) -> Result<Value, CommandError> {
     let connection = storage::database(&state.data_dir)?;
-    let target_id = if id.is_empty() { "default_template" } else { id };
+    let target_id = if id.is_empty() {
+        "default_template"
+    } else {
+        id
+    };
     let default_elements = default_id_card_elements();
     let result = connection
         .query_row(
@@ -1907,16 +1987,36 @@ pub fn save_id_card_template(state: &MobileState, template: &Value) -> Result<Va
 
     let now = current_iso(&transaction);
     let id = text(template, "id");
-    let id = if id.is_empty() { "default_template" } else { id };
+    let id = if id.is_empty() {
+        "default_template"
+    } else {
+        id
+    };
     let name = text(template, "name");
-    let name = if name.is_empty() { "Template Default SPPG" } else { name };
+    let name = if name.is_empty() {
+        "Template Default SPPG"
+    } else {
+        name
+    };
     let orientation = text(template, "orientation");
-    let orientation = if orientation == "portrait" { "portrait" } else { "landscape" };
+    let orientation = if orientation == "portrait" {
+        "portrait"
+    } else {
+        "landscape"
+    };
     let front_bg_url = text(template, "frontBgUrl");
     let back_bg_url = text(template, "backBgUrl");
     let elements = template.get("elements").cloned().unwrap_or(json!([]));
     let elements_json = serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string());
-    let is_active = if template.get("isActive").and_then(Value::as_bool).unwrap_or(true) { 1 } else { 0 };
+    let is_active = if template
+        .get("isActive")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        1
+    } else {
+        0
+    };
 
     transaction
         .execute(
@@ -2013,7 +2113,10 @@ pub fn force_enqueue_settings(state: &MobileState) -> Result<Value, CommandError
         .map_err(|_| CommandError::internal())?;
 
     if let Some(profile) = profile {
-        let company_name = profile.get("company_name").and_then(Value::as_str).unwrap_or("SPPG");
+        let company_name = profile
+            .get("company_name")
+            .and_then(Value::as_str)
+            .unwrap_or("SPPG");
         if !company_name.is_empty() {
             sync::enqueue(
                 &transaction,
@@ -2069,4 +2172,3 @@ pub fn force_enqueue_settings(state: &MobileState) -> Result<Value, CommandError
         "pesan": format!("{enqueued} pengaturan berhasil dijadwalkan ulang untuk sinkronisasi."),
     }))
 }
-

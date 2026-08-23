@@ -9,6 +9,7 @@ const AUTO_SYNC_INTERVAL_MS = 30 * 1000; // 30 detik untuk sync background real-
 export function AutoSyncRunner() {
   const { isAuthenticated } = useAuth();
   const isRunningRef = useRef(false);
+  const lastSyncTimeRef = useRef(0);
 
   useEffect(() => {
     if (!isAuthenticated || !isDesktopSyncAvailable()) return;
@@ -19,6 +20,7 @@ export function AutoSyncRunner() {
       isRunningRef.current = true;
       try {
         const result = await syncNow();
+        lastSyncTimeRef.current = Date.now();
         if (result) {
           window.dispatchEvent(
             new CustomEvent("sppg:sync-completed", { detail: result }),
@@ -41,14 +43,19 @@ export function AutoSyncRunner() {
       void runAutoSync();
     }, AUTO_SYNC_INTERVAL_MS);
 
-    // Sinkronisasi instan saat user kembali ke window/tab
+    // Sinkronisasi instan saat user kembali ke window/tab (throttle 15 detik)
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
+      if (
+        document.visibilityState === "visible" &&
+        Date.now() - lastSyncTimeRef.current >= 15_000
+      ) {
         void runAutoSync();
       }
     };
     const onFocus = () => {
-      void runAutoSync();
+      if (Date.now() - lastSyncTimeRef.current >= 15_000) {
+        void runAutoSync();
+      }
     };
 
     document.addEventListener("visibilitychange", onVisibilityChange);

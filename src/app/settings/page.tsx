@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
-import { hasPermission } from "@/lib/auth/access";
+import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
 import {
@@ -26,6 +26,7 @@ export default function SettingsPage() {
   const { user, isAuthenticated, isLoading: authLoading, logout } = useAuth();
   const router = useRouter();
   const isOnline = useOnlineStatus();
+  const canOperational = canAccessArea(user, "operational");
   const canManageGeofence = Boolean(
     user?.isSuperadmin || hasPermission(user, "branding.manage"),
   );
@@ -241,6 +242,34 @@ export default function SettingsPage() {
             {saveMessage}
           </div>
         )}
+
+        {/* Pusat Operasional SPPG Section (Hanya jika memiliki izin operasional) */}
+        {canOperational ? (
+          <div className="rounded-3xl border border-indigo-500/20 bg-gradient-to-br from-indigo-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-xl bg-indigo-500/20 text-indigo-300">
+                  <Icon name="tools" className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Pusat Operasional SPPG
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Koreksi admin, penugasan backup &amp; entri manual
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/operational"
+                onClick={() => triggerHaptic("light")}
+                className="rounded-xl bg-indigo-500 px-3.5 py-1.5 text-xs font-black text-white shadow-md hover:bg-indigo-400 active:scale-95 transition"
+              >
+                Buka &rarr;
+              </Link>
+            </div>
+          </div>
+        ) : null}
 
         {/* Superadmin Turso Database Cloud Section */}
         {user?.isSuperadmin ? (

@@ -18,6 +18,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             mobile::commands::desktop_get_session,
             mobile::commands::desktop_get_runtime_status,
+            mobile::commands::desktop_get_bootstrap_status,
+            mobile::commands::desktop_bootstrap_superadmin,
             mobile::commands::desktop_login,
             mobile::commands::desktop_logout,
             mobile::commands::desktop_get_master_operators,
@@ -81,5 +83,8 @@ pub fn run() {
             mobile::commands::desktop_clear_turso_config,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .unwrap_or_else(|error| {
+            eprintln!("Aplikasi Mobile berhenti karena runtime Tauri gagal: {error}");
+            std::process::exit(1);
+        });
 }

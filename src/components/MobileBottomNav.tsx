@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Icon, type IconName } from "@/components/ui/Icon";
-import { canAccessArea, hasPermission } from "@/lib/auth/access";
+import { canAccessArea } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
 
@@ -19,18 +19,17 @@ export function MobileBottomNav() {
   const { user } = useAuth();
 
   const canHome = canAccessArea(user, "home");
+  const canKaryawan = canAccessArea(user, "karyawan");
   const canScanner = canAccessArea(user, "scanner");
   const canHistory = canAccessArea(user, "history");
-  const canOperational = canAccessArea(user, "operational");
-  const canSync = hasPermission(user, "sync.view");
 
   const navItems: NavItem[] = [];
 
   if (canHome) {
     navItems.push({ href: "/dashboard", icon: "dashboard", label: "Beranda" });
   }
-  if (canHistory) {
-    navItems.push({ href: "/history", icon: "clock", label: "Riwayat" });
+  if (canKaryawan) {
+    navItems.push({ href: "/karyawan", icon: "users", label: "Karyawan" });
   }
   if (canScanner) {
     navItems.push({
@@ -40,16 +39,10 @@ export function MobileBottomNav() {
       isElevated: true,
     });
   }
-  if (canOperational) {
-    navItems.push({
-      href: "/operational",
-      icon: "tools",
-      label: "Operasional",
-    });
-  } else if (canSync) {
-    navItems.push({ href: "/sync", icon: "sync", label: "Sync" });
+  if (canHistory) {
+    navItems.push({ href: "/history", icon: "clock", label: "Riwayat" });
   }
-  navItems.push({ href: "/settings", icon: "settings", label: "Akun" });
+  navItems.push({ href: "/settings", icon: "settings", label: "Pengaturan" });
 
   return (
     <nav

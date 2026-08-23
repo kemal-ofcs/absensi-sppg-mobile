@@ -18,7 +18,7 @@ import { requestScreenWakeLock } from "@/lib/client/wakelock";
 import type { ScanResult, ScanTerminalInput } from "@/lib/contracts/scanner";
 import { submitTerminalScan } from "@/lib/gateways/scanner";
 
-interface ScanLogItem {
+type ScanLogItem = {
   id: string;
   waktu: string;
   nama: string;
@@ -28,7 +28,7 @@ interface ScanLogItem {
   statusProses: string;
   pesan: string;
   sukses: boolean;
-}
+};
 
 export function ScannerView() {
   const [cameraActive, setCameraActive] = useState(false);
@@ -60,12 +60,18 @@ export function ScannerView() {
   // Request Wake Lock to keep phone screen awake while scanning
   useEffect(() => {
     let cleanupWakeLock: (() => void) | undefined;
+    let cancelled = false;
     if (cameraActive) {
       void requestScreenWakeLock().then((cleanup) => {
-        cleanupWakeLock = cleanup;
+        if (cancelled) {
+          cleanup();
+        } else {
+          cleanupWakeLock = cleanup;
+        }
       });
     }
     return () => {
+      cancelled = true;
       cleanupWakeLock?.();
     };
   }, [cameraActive]);
@@ -279,11 +285,7 @@ export function ScannerView() {
             }
           },
         );
-      } catch (constraintErr) {
-        console.warn(
-          "Gagal menggunakan constraint ideal, mencoba constraint dasar:",
-          constraintErr,
-        );
+      } catch {
         controls = await codeReader.decodeFromConstraints(
           { video: true },
           videoRef.current,

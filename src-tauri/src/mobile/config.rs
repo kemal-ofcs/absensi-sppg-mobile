@@ -11,8 +11,14 @@ use super::{
 };
 
 const BUILD_OFFLINE_MAX_AGE_HOURS: Option<&str> = option_env!("SPPG_OFFLINE_AUTH_MAX_AGE_HOURS");
+#[cfg(debug_assertions)]
 const BUILD_TURSO_DATABASE_URL: Option<&str> = option_env!("TURSO_DATABASE_URL");
+#[cfg(not(debug_assertions))]
+const BUILD_TURSO_DATABASE_URL: Option<&str> = None;
+#[cfg(debug_assertions)]
 const BUILD_TURSO_AUTH_TOKEN: Option<&str> = option_env!("TURSO_AUTH_TOKEN");
+#[cfg(not(debug_assertions))]
+const BUILD_TURSO_AUTH_TOKEN: Option<&str> = None;
 const MOBILE_HTTP_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_FALLBACK_URL: &str = "https://absensi-sppg-seven.vercel.app";
 
@@ -39,6 +45,38 @@ fn parse_offline_hours_value(configured: Option<&str>, debug_build: bool) -> Res
 
 fn parse_offline_hours() -> Result<u64, String> {
     parse_offline_hours_value(BUILD_OFFLINE_MAX_AGE_HOURS, cfg!(debug_assertions))
+}
+
+fn parse_server_url(raw_url: &str) -> Result<Url, CommandError> {
+    let mut parsed = Url::parse(raw_url.trim())
+        .map_err(|_| CommandError::new("SERVER_URL_INVALID", "Format URL Server tidak valid."))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !matches!(parsed.path(), "" | "/")
+    {
+        return Err(CommandError::new(
+            "SERVER_URL_INVALID",
+            "URL Server harus berupa origin HTTP(S) tanpa kredensial, path, query, atau fragment.",
+        ));
+    }
+    if parsed.scheme() != "https"
+        && !(cfg!(debug_assertions)
+            && matches!(
+                parsed.host_str(),
+                Some("localhost" | "127.0.0.1" | "::1" | "10.0.2.2")
+            ))
+    {
+        return Err(CommandError::new(
+            "SERVER_URL_INVALID",
+            "URL Server wajib memakai HTTPS; HTTP hanya diizinkan untuk localhost saat debug.",
+        ));
+    }
+    parsed.set_path("");
+    Ok(parsed)
 }
 
 impl MobileState {
@@ -81,14 +119,17 @@ impl MobileState {
         };
 
         // 1. Cek vault terenkripsi
-        let vault_config = secrets::load_turso_config(&temp_state).ok().flatten();
+        let vault_config =
+            secrets::load_turso_config(&temp_state).map_err(|error| error.message)?;
 
         // 2. Cek database setting lokal
-        let db_turso_url = storage::get_system_setting(&data_dir, "turso_database_url").ok().flatten();
-        let db_turso_token = storage::get_system_setting(&data_dir, "turso_auth_token").ok().flatten();
+        let db_turso_url = storage::get_system_setting(&data_dir, "turso_database_url")
+            .map_err(|error| error.message)?;
+        let db_turso_token = storage::get_system_setting(&data_dir, "turso_auth_token")
+            .map_err(|error| error.message)?;
 
-        let resolved_config = vault_config.or_else(|| {
-            if let (Some(u), Some(t)) = (db_turso_url, db_turso_token) {
+        let resolved_config = vault_config.clone().or_else(|| {
+            if let (Some(u), Some(t)) = (db_turso_url.as_ref(), db_turso_token.as_ref()) {
                 if !u.trim().is_empty() {
                     return Some(TursoConfig {
                         database_url: u.trim().to_owned(),
@@ -107,13 +148,31 @@ impl MobileState {
             None
         });
 
+        // Migrasi fallback plaintext lama ke vault tanpa memutus konfigurasi instalasi aktif.
+        if vault_config.is_none() {
+            if let Some(config) = resolved_config.as_ref() {
+                secrets::save_turso_config(&temp_state, config).map_err(|error| error.message)?;
+            }
+        }
+        if db_turso_token
+            .as_deref()
+            .is_some_and(|token| !token.is_empty())
+        {
+            storage::set_system_setting(&data_dir, "turso_auth_token", "")
+                .map_err(|error| error.message)?;
+        }
+
         let server_origin = if let Some(ref cfg) = resolved_config {
             normalize_turso_url(&cfg.database_url)
                 .map(|u| u.origin().ascii_serialization())
-                .unwrap_or_else(|_| DEFAULT_FALLBACK_URL.into())
+                .map_err(|error| error.message)?
         } else {
-            let saved_url = storage::get_system_setting(&data_dir, "server_api_base_url").ok().flatten();
-            saved_url.unwrap_or_else(|| DEFAULT_FALLBACK_URL.into())
+            let saved_url = storage::get_system_setting(&data_dir, "server_api_base_url")
+                .map_err(|error| error.message)?
+                .unwrap_or_else(|| DEFAULT_FALLBACK_URL.into());
+            parse_server_url(&saved_url)
+                .map(|url| url.origin().ascii_serialization())
+                .map_err(|error| error.message)?
         };
 
         Ok(Self {
@@ -128,16 +187,26 @@ impl MobileState {
     }
 
     pub fn server_origin(&self) -> String {
-        self.server_origin.read().unwrap().clone()
+        self.server_origin
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
-    pub fn api_base_url(&self) -> Url {
-        Url::parse(&self.server_origin())
-            .unwrap_or_else(|_| Url::parse(DEFAULT_FALLBACK_URL).unwrap())
+    pub fn api_base_url(&self) -> Result<Url, CommandError> {
+        Url::parse(&self.server_origin()).map_err(|_| {
+            CommandError::new(
+                "DESKTOP_SERVER_URL_INVALID",
+                "URL server aktif tidak valid. Periksa konfigurasi koneksi aplikasi.",
+            )
+        })
     }
 
     pub fn get_turso_client(&self) -> Result<TursoClient, CommandError> {
-        let config_guard = self.turso_config.read().unwrap();
+        let config_guard = self
+            .turso_config
+            .read()
+            .map_err(|_| CommandError::internal())?;
         if let Some(config) = config_guard.as_ref() {
             TursoClient::from_config(config, self.http.clone())
         } else {
@@ -149,7 +218,10 @@ impl MobileState {
     }
 
     pub fn turso_config(&self) -> Option<TursoConfig> {
-        self.turso_config.read().unwrap().clone()
+        self.turso_config
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn set_turso_config(
@@ -162,8 +234,16 @@ impl MobileState {
 
         let resolved_token = if auth_token.trim().is_empty() {
             self.turso_config()
-                .map(|c| c.auth_token)
-                .unwrap_or_default()
+                .filter(|config| {
+                    normalize_turso_url(&config.database_url).is_ok_and(|url| url == normalized)
+                })
+                .map(|config| config.auth_token)
+                .ok_or_else(|| {
+                    CommandError::new(
+                        "TURSO_TOKEN_REQUIRED",
+                        "Auth Token wajib diisi saat URL database Turso berubah.",
+                    )
+                })?
         } else {
             auth_token.trim().to_owned()
         };
@@ -176,24 +256,37 @@ impl MobileState {
         // Simpan ke vault terenkripsi
         secrets::save_turso_config(self, &config)?;
 
-        // Simpan juga ke setting lokal sebagai fallback
+        // URL non-rahasia boleh disimpan lokal; token hanya boleh berada di vault.
         storage::set_system_setting(&self.data_dir, "turso_database_url", &config.database_url)?;
-        storage::set_system_setting(&self.data_dir, "turso_auth_token", &config.auth_token)?;
+        storage::set_system_setting(&self.data_dir, "turso_auth_token", "")?;
 
-        *self.turso_config.write().unwrap() = Some(config);
-        *self.server_origin.write().unwrap() = origin.clone();
+        *self
+            .turso_config
+            .write()
+            .map_err(|_| CommandError::internal())? = Some(config);
+        *self
+            .server_origin
+            .write()
+            .map_err(|_| CommandError::internal())? = origin.clone();
 
         Ok(origin)
     }
 
     pub fn set_server_url(&self, raw_url: &str) -> Result<String, CommandError> {
-        self.set_turso_config(raw_url, "")
+        let parsed = parse_server_url(raw_url)?;
+        let origin = parsed.origin().ascii_serialization();
+        storage::set_system_setting(&self.data_dir, "server_api_base_url", parsed.as_str())?;
+        *self
+            .server_origin
+            .write()
+            .map_err(|_| CommandError::internal())? = origin.clone();
+        Ok(origin)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_turso_url, parse_offline_hours_value};
+    use super::{normalize_turso_url, parse_offline_hours_value, parse_server_url};
 
     #[test]
     fn turso_endpoint_normalization() {
@@ -204,6 +297,13 @@ mod tests {
     }
 
     #[test]
+    fn legacy_server_endpoint_must_be_safe_origin() {
+        assert!(parse_server_url("https://buyer.example").is_ok());
+        assert!(parse_server_url("https://buyer.example/api").is_err());
+        assert!(parse_server_url("https://user@buyer.example").is_err());
+    }
+
+    #[test]
     fn offline_window_is_bounded_and_required_in_release() {
         assert_eq!(parse_offline_hours_value(Some("720"), false), Ok(720));
         assert!(parse_offline_hours_value(None, false).is_err());
@@ -211,4 +311,3 @@ mod tests {
         assert!(parse_offline_hours_value(Some("721"), false).is_err());
     }
 }
-

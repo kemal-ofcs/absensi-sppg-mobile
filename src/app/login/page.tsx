@@ -1,11 +1,22 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { BootstrapPanel } from "@/components/BootstrapPanel";
 import { BrandLogo } from "@/components/ui/BrandLogo";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
+import {
+  type BootstrapStatus,
+  getBootstrapStatus,
+} from "@/lib/gateways/bootstrap";
 import { getServerUrl, setServerUrl } from "@/lib/gateways/server-config";
 import { useOnlineStatus } from "@/lib/hooks/useOnlineStatus";
 
@@ -37,6 +48,18 @@ export default function LoginPage() {
   const [cooldownSeconds, setCooldownSeconds] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
+  const [bootstrapStatus, setBootstrapStatus] =
+    useState<BootstrapStatus | null>(null);
+
+  const refreshBootstrapStatus = useCallback(() => {
+    void getBootstrapStatus()
+      .then(setBootstrapStatus)
+      .catch(() => setBootstrapStatus(null));
+  }, []);
+
+  useEffect(() => {
+    refreshBootstrapStatus();
+  }, [refreshBootstrapStatus]);
 
   // Live countdown ticker
   useEffect(() => {
@@ -143,6 +166,15 @@ export default function LoginPage() {
       setIsSavingServer(false);
     }
   };
+
+  if (!isAuthenticated && bootstrapStatus?.required) {
+    return (
+      <BootstrapPanel
+        status={bootstrapStatus}
+        onCompleted={refreshBootstrapStatus}
+      />
+    );
+  }
 
   return (
     <div className="min-h-dvh flex flex-col justify-between bg-slate-950 p-6 pt-[calc(2rem+env(safe-area-inset-top))] pb-[calc(2rem+env(safe-area-inset-bottom))]">
