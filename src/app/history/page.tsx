@@ -14,6 +14,31 @@ import { useDebounce } from "@/lib/hooks/useDebounce";
 
 type HistoryTab = "daily" | "scan-logs";
 
+function formatTimeOnly(timeStr: unknown): string {
+  if (!timeStr || typeof timeStr !== "string") return "--:--";
+  const s = timeStr.trim();
+  if (!s || s === "-" || s === "--:--") return "--:--";
+  const clean = s.includes(" ")
+    ? s.split(" ")[1]
+    : s.includes("T")
+      ? s.split("T")[1]?.split(".")[0]?.split("Z")[0] || ""
+      : s;
+  if (!clean) return "--:--";
+  const parts = clean.split(":");
+  if (parts.length < 2) return clean;
+  const h = parts[0].padStart(2, "0");
+  const m = parts[1].padStart(2, "0");
+  const sec = parts[2] ? parts[2].slice(0, 2).padStart(2, "0") : "00";
+  return `${h}:${m}:${sec}`;
+}
+
+function formatMinutesToHours(min: unknown): string {
+  const num = Number(min || 0);
+  if (num <= 0) return "0 mnt";
+  const hours = (num / 60).toFixed(1).replace(/\.0$/, "");
+  return `${num} mnt (${hours} jam)`;
+}
+
 export default function HistoryPage() {
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
   const router = useRouter();
@@ -316,8 +341,8 @@ export default function HistoryPage() {
                   const statusStr = String(
                     rec.status_absen || rec.status_kehadiran || "Hadir",
                   );
-                  const jamMasuk = String(rec.jam_masuk || "--:--");
-                  const jamPulang = String(rec.jam_pulang || "--:--");
+                  const jamMasuk = formatTimeOnly(rec.jam_masuk);
+                  const jamPulang = formatTimeOnly(rec.jam_pulang);
                   const modeTugas = String(rec.mode_tugas || "NORMAL");
                   const idKey = String(rec.id_sesi || rec.id_absensi || idx);
 
@@ -389,7 +414,7 @@ export default function HistoryPage() {
                 const nama = String(log.nama || "Tanpa Nama");
                 const idKaryawan = String(log.id_karyawan || "-");
                 const divisi = String(log.divisi || "-");
-                const jamScan = String(log.jam_scan || "--:--");
+                const jamScan = formatTimeOnly(log.jam_scan);
                 const jenisScan = String(log.jenis_scan || "Scan");
                 const statusProses = String(log.status_proses || "Berhasil");
                 const sumberData = String(log.sumber_data || "Scanner");
@@ -497,43 +522,43 @@ export default function HistoryPage() {
                 <div>
                   <span className="text-slate-500">Jam Masuk:</span>
                   <p className="font-mono font-semibold text-emerald-400">
-                    {String(selectedDaily.jam_masuk || "--:--")}
+                    {formatTimeOnly(selectedDaily.jam_masuk)}
                   </p>
                 </div>
                 <div>
                   <span className="text-slate-500">Jam Pulang:</span>
                   <p className="font-mono font-semibold text-sky-400">
-                    {String(selectedDaily.jam_pulang || "--:--")}
+                    {formatTimeOnly(selectedDaily.jam_pulang)}
                   </p>
                 </div>
                 <div>
                   <span className="text-slate-500">Terlambat:</span>
                   <p className="font-semibold text-amber-300">
-                    {Number(selectedDaily.menit_terlambat || 0)} menit
+                    {formatMinutesToHours(selectedDaily.menit_terlambat)}
                   </p>
                 </div>
                 <div>
                   <span className="text-slate-500">Datang Lebih Awal:</span>
                   <p className="font-semibold text-slate-300">
-                    {Number(selectedDaily.menit_datang_awal || 0)} menit
+                    {formatMinutesToHours(selectedDaily.menit_datang_awal)}
                   </p>
                 </div>
                 <div>
                   <span className="text-slate-500">Total Jam Kerja:</span>
                   <p className="font-semibold text-slate-200">
-                    {Number(selectedDaily.jam_kerja || 0)} menit
+                    {formatMinutesToHours(selectedDaily.jam_kerja)}
                   </p>
                 </div>
                 <div>
                   <span className="text-slate-500">Lembur:</span>
                   <p className="font-semibold text-purple-300">
-                    {Number(selectedDaily.lembur || 0)} menit
+                    {formatMinutesToHours(selectedDaily.lembur)}
                   </p>
                 </div>
                 <div>
                   <span className="text-slate-500">Jam Kerja Kurang:</span>
                   <p className="font-semibold text-rose-300">
-                    {Number(selectedDaily.jam_kerja_kurang || 0)} menit
+                    {formatMinutesToHours(selectedDaily.jam_kerja_kurang)}
                   </p>
                 </div>
               </div>

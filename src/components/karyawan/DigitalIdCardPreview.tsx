@@ -189,6 +189,8 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
     };
   }, [template, companyProfile, cardSide, employee, logoDataUrl, qrDataUrl]);
 
+  const [sharingCard, setSharingCard] = useState(false);
+
   const handleCopyToken = async () => {
     if (!tokenAbsensi) return;
     try {
@@ -212,6 +214,50 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
       // Handled
     } finally {
       setTimeout(() => setDownloadingCard(false), 2500);
+    }
+  };
+
+  const handleShareCard = async () => {
+    if (!renderedCardUrl) return;
+    triggerHaptic("light");
+    setSharingCard(true);
+    const sideLabel = cardSide === "front" ? "Depan" : "Belakang";
+    const filename = `ID-Card-${sideLabel}-${nama.replace(/[^a-zA-Z0-9_-]/g, "_")}.png`;
+    try {
+      if (
+        typeof navigator !== "undefined" &&
+        typeof navigator.share === "function"
+      ) {
+        try {
+          const res = await fetch(renderedCardUrl);
+          const blob = await res.blob();
+          const file = new File([blob], filename, { type: "image/png" });
+
+          if (navigator.canShare?.({ files: [file] })) {
+            await navigator.share({
+              title: `ID Card SPPG (${sideLabel}) - ${nama}`,
+              text: `ID Card Digital SPPG (${sideLabel}) untuk ${nama}`,
+              files: [file],
+            });
+            return;
+          }
+          await navigator.share({
+            title: `ID Card SPPG (${sideLabel}) - ${nama}`,
+            text: `ID Card Digital SPPG (${sideLabel}) untuk ${nama}`,
+          });
+          return;
+        } catch (shareErr) {
+          if ((shareErr as Error)?.name === "AbortError") {
+            return;
+          }
+        }
+      }
+      // Fallback: download
+      await handleDownloadCard();
+    } catch {
+      // Handled
+    } finally {
+      setSharingCard(false);
     }
   };
 
@@ -402,14 +448,27 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
       )}
 
       {/* Tombol Aksi di Bawah Kartu */}
-      <div className="flex gap-2 mt-3">
+      <div className="grid grid-cols-2 gap-2 mt-3">
+        {/* Bagikan Gambar Kartu jika rendered */}
+        {renderedCardUrl && (
+          <button
+            type="button"
+            disabled={sharingCard}
+            onClick={() => void handleShareCard()}
+            className="flex items-center justify-center gap-2 rounded-xl bg-sky-500 px-3 py-2.5 text-xs font-bold text-slate-950 hover:bg-sky-400 active:scale-95 transition disabled:opacity-40"
+          >
+            <Icon name="share" className="size-4" />
+            {sharingCard ? "Membagikan..." : "Bagikan ID Card"}
+          </button>
+        )}
+
         {/* Unduh Gambar Kartu jika rendered */}
         {renderedCardUrl && (
           <button
             type="button"
             disabled={downloadingCard}
             onClick={() => void handleDownloadCard()}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/20 active:scale-95 transition disabled:opacity-40"
+            className="flex items-center justify-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/20 active:scale-95 transition disabled:opacity-40"
           >
             <Icon
               name={downloadingCard ? "check" : "download"}
@@ -430,7 +489,9 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
             triggerHaptic("light");
             setQrFullscreen(true);
           }}
-          className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-sky-500/40 bg-sky-500/10 px-3 py-2.5 text-xs font-bold text-sky-300 hover:bg-sky-500/20 active:scale-95 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          className={`flex items-center justify-center gap-2 rounded-xl border border-sky-500/40 bg-sky-500/10 px-3 py-2.5 text-xs font-bold text-sky-300 hover:bg-sky-500/20 active:scale-95 transition disabled:opacity-40 disabled:cursor-not-allowed ${
+            !renderedCardUrl ? "col-span-1" : ""
+          }`}
         >
           <Icon name="id-card" className="size-4" />
           Perbesar QR
@@ -441,7 +502,9 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
           type="button"
           disabled={!tokenAbsensi}
           onClick={() => void handleCopyToken()}
-          className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2.5 text-xs font-bold text-slate-300 hover:bg-white/10 active:scale-95 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          className={`flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2.5 text-xs font-bold text-slate-300 hover:bg-white/10 active:scale-95 transition disabled:opacity-40 disabled:cursor-not-allowed ${
+            !renderedCardUrl ? "col-span-1" : ""
+          }`}
         >
           <Icon name={copied ? "check" : "upload"} className="size-4" />
           {copied ? "Tersalin!" : "Salin Token"}

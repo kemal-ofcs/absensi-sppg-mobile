@@ -82,14 +82,14 @@ export function QrFullscreenDialog({
           if (navigator.canShare?.({ files: [file] })) {
             await navigator.share({
               title: `QR Code Absensi - ${employeeName}`,
-              text: `QR Code Absensi untuk ${employeeName} (SPPG)`,
+              text: `QR Code Absensi SPPG untuk ${employeeName}`,
               files: [file],
             });
             return;
           }
           await navigator.share({
             title: `QR Code Absensi - ${employeeName}`,
-            text: `QR Code Absensi untuk ${employeeName} (SPPG)`,
+            text: `QR Code Absensi SPPG untuk ${employeeName}`,
           });
           return;
         } catch (shareErr) {
@@ -98,10 +98,8 @@ export function QrFullscreenDialog({
           }
         }
       }
-      // Fallback: Jika WebView tidak mendukung Web Share, tampilkan alert ramah
-      alert(
-        "Fitur Bagikan tidak didukung penuh. Tahan gambar di atas untuk membagikan.",
-      );
+      // Fallback: Unduh jika Web Share tidak tersedia
+      await handleDownload();
     } catch {
       // Handled
     } finally {
@@ -153,12 +151,9 @@ export function QrFullscreenDialog({
             {employeeName}
           </p>
           <p className="text-xs font-medium text-slate-500 mt-1">
-            <span className="block text-sky-600 font-bold mb-0.5">
-              💡 Tips Android:
-            </span>
-            Tekan dan tahan gambar QR di atas untuk
+            Gunakan tombol <b>Bagikan QR</b> untuk membagikan ke WhatsApp
             <br />
-            opsi <b>Bagikan</b> atau <b>Simpan ke Handphone</b>.
+            atau tombol <b>Simpan Berkas</b> untuk mengunduh gambar.
           </p>
         </div>
       </div>
@@ -173,7 +168,7 @@ export function QrFullscreenDialog({
           className="flex flex-1 items-center justify-center gap-2 rounded-2xl bg-sky-500 py-3.5 px-4 text-xs font-black text-slate-950 shadow-md hover:bg-sky-400 active:scale-95 transition disabled:opacity-50"
         >
           <Icon name="share" className="size-4" />
-          {sharing ? "Membagikan..." : "Bagikan Teks"}
+          {sharing ? "Membagikan..." : "Bagikan QR"}
         </button>
 
         {/* Tombol Simpan */}

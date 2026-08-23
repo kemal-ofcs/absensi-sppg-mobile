@@ -27,6 +27,7 @@ export default function SettingsPage() {
   const router = useRouter();
   const isOnline = useOnlineStatus();
   const canOperational = canAccessArea(user, "operational");
+  const canShift = canAccessArea(user, "shift");
   const canManageGeofence = Boolean(
     user?.isSuperadmin || hasPermission(user, "branding.manage"),
   );
@@ -266,6 +267,34 @@ export default function SettingsPage() {
                 className="rounded-xl bg-indigo-500 px-3.5 py-1.5 text-xs font-black text-white shadow-md hover:bg-indigo-400 active:scale-95 transition"
               >
                 Buka &rarr;
+              </Link>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Shift Kerja & Jadwal Section (Hanya jika memiliki izin shift) */}
+        {canShift ? (
+          <div className="rounded-3xl border border-sky-500/20 bg-gradient-to-br from-sky-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-xl bg-sky-500/20 text-sky-300">
+                  <Icon name="clock" className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Shift Kerja &amp; Jadwal
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Atur jam masuk, jam pulang, toleransi &amp; istirahat
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/shift"
+                onClick={() => triggerHaptic("light")}
+                className="rounded-xl bg-sky-500 px-3.5 py-1.5 text-xs font-black text-slate-950 shadow-md hover:bg-sky-400 active:scale-95 transition whitespace-nowrap"
+              >
+                Kelola &rarr;
               </Link>
             </div>
           </div>

@@ -2266,6 +2266,16 @@ pub fn get_id_card_template(state: &MobileState, id: &str) -> Result<Value, Comm
             |row| {
                 let elements_raw: String = row.get::<_, Option<String>>(5)?.unwrap_or_default();
                 let mut elements: Value = serde_json::from_str(&elements_raw).unwrap_or_else(|_| json!([]));
+                if let Value::String(inner_str) = &elements {
+                    if let Ok(nested) = serde_json::from_str::<Value>(inner_str) {
+                        elements = nested;
+                    }
+                }
+                if let Value::String(inner_str2) = &elements {
+                    if let Ok(nested2) = serde_json::from_str::<Value>(inner_str2) {
+                        elements = nested2;
+                    }
+                }
                 if elements.as_array().map(|a| a.is_empty()).unwrap_or(true) {
                     elements = default_id_card_elements();
                 }
@@ -2393,7 +2403,7 @@ pub fn save_id_card_template(state: &MobileState, template: &Value) -> Result<Va
         "orientation": orientation,
         "front_bg_url": if front_bg_url.is_empty() { Value::Null } else { Value::String(front_bg_url.to_string()) },
         "back_bg_url": if back_bg_url.is_empty() { Value::Null } else { Value::String(back_bg_url.to_string()) },
-        "elements_json": elements_json,
+        "elements_json": elements,
         "is_active": is_active,
         "created_at": now,
         "updated_at": now,

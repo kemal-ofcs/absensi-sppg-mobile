@@ -2670,7 +2670,10 @@ async fn apply_event_to_turso(
                             lp = excluded.lp,
                             id_shift = excluded.id_shift,
                             status_aktif = excluded.status_aktif,
-                            catatan = excluded.catatan;"#,
+                            catatan = excluded.catatan,
+                            jenis_personil = ?,
+                            tanggal_mulai_aktif = ?,
+                            tanggal_selesai_aktif = ?;"#,
                         vec![
                             json!(id_unik),
                             json!(kode_karyawan),
@@ -2685,6 +2688,9 @@ async fn apply_event_to_turso(
                                 .and_then(Value::as_str)
                                 .unwrap_or("Aktif")),
                             json!(row.get("catatan").and_then(Value::as_str)),
+                            json!(row.get("jenis_personil").and_then(Value::as_str).unwrap_or("Pegawai")),
+                            json!(row.get("tanggal_mulai_aktif").and_then(Value::as_str)),
+                            json!(row.get("tanggal_selesai_aktif").and_then(Value::as_str)),
                         ],
                     )
                     .await?;
