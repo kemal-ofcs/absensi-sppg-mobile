@@ -42,6 +42,8 @@ const MOBILE_COMMANDS: &[&str] = &[
     "desktop_get_dashboard_data",
     "desktop_get_id_cards",
     "desktop_update_id_card",
+    "desktop_get_id_card_template",
+    "desktop_save_id_card_template",
     "desktop_get_geofence_settings",
     "desktop_update_geofence_settings",
     "desktop_get_scanner_settings",
@@ -66,6 +68,8 @@ const MOBILE_COMMANDS: &[&str] = &[
     "desktop_save_turso_config",
     "desktop_test_turso_connection",
     "desktop_clear_turso_config",
+    "desktop_get_company_profile",
+    "desktop_update_company_profile",
 ];
 
 fn local_build_values() -> HashMap<String, String> {

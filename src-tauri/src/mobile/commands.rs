@@ -1071,6 +1071,24 @@ pub fn desktop_trigger_generate_alfa(
 }
 
 #[tauri::command]
+pub fn desktop_get_id_card_template(
+    state: State<'_, MobileState>,
+    id: Option<String>,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "employees.view")?;
+    operational::get_id_card_template(&state, id.as_deref().unwrap_or("default_template"))
+}
+
+#[tauri::command]
+pub fn desktop_save_id_card_template(
+    state: State<'_, MobileState>,
+    template: Value,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "employees.manage")?;
+    operational::save_id_card_template(&state, &template)
+}
+
+#[tauri::command]
 pub fn desktop_get_turso_url(
     state: State<'_, MobileState>,
 ) -> Result<Option<String>, CommandError> {
@@ -1185,4 +1203,18 @@ pub fn desktop_clear_turso_config(state: State<'_, MobileState>) -> Result<(), C
         .write()
         .map_err(|_| CommandError::internal())? = None;
     Ok(())
+}
+
+#[tauri::command]
+pub fn desktop_get_company_profile(state: State<'_, MobileState>) -> Result<Value, CommandError> {
+    operational::get_company_profile(&state)
+}
+
+#[tauri::command]
+pub fn desktop_update_company_profile(
+    state: State<'_, MobileState>,
+    profile: Value,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "settings.manage")?;
+    operational::update_company_profile(&state, &profile)
 }

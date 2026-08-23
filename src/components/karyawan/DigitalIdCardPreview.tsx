@@ -4,9 +4,17 @@ import { useEffect, useState } from "react";
 import { QrFullscreenDialog } from "@/components/karyawan/QrFullscreenDialog";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { downloadDataUrl } from "@/lib/client/download";
 import { triggerHaptic } from "@/lib/client/haptics";
-import { renderIdCardSideToCanvas } from "@/lib/client/id-card-renderer";
+import {
+  preloadCardAssets,
+  renderIdCardSideToCanvas,
+} from "@/lib/client/id-card-renderer";
 import { createQrPng, employeeQrPayload } from "@/lib/client/qr-code";
+import {
+  type CompanyProfile,
+  getCompanyProfile,
+} from "@/lib/gateways/company-profile";
 import {
   getIdCardTemplate,
   type IdCardTemplateConfig,
@@ -22,24 +30,26 @@ interface DigitalIdCardPreviewProps {
 type QrStatus = "loading" | "ready" | "no-token" | "error";
 
 /**
- * Pratinjau ID Card digital karyawan.
+ * Pratinjau ID Card digital karyawan dengan toggle Sisi Depan dan Sisi Belakang.
  *
  * Mendukung 2 mode tampilan:
- * 1. Template Kustom Resmi (jika ada template yang dikonfigurasi di Desktop/Cloud):
- *    Merender sisi depan & belakang kartu sesuai desain latar dan posisi elemen.
+ * 1. Template Kustom Resmi (jika ada template di SQLite/Cloud):
+ *    Merender sisi depan & belakang kartu sesuai desain latar dan posisi elemen canvas.
  * 2. Fallback Kartu Digital Modern SPPG:
- *    Tampilan gradien elegan dengan inisial avatar dan QR Code absensi tajam.
- *
- * PERFORMA: Seluruh aset dan canvas hanya di-generate on-demand saat komponen mount.
+ *    Tampilan gradien elegan dengan inisial avatar, QR Code absensi, dan sisi belakang ketentuan.
  */
 export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
   const logoDataUrl = useAppLogo();
 
   // Template State
   const [template, setTemplate] = useState<IdCardTemplateConfig | null>(null);
+  const [companyProfile, setCompanyProfile] = useState<CompanyProfile | null>(
+    null,
+  );
   const [cardSide, setCardSide] = useState<CardSide>("front");
   const [templateRendering, setTemplateRendering] = useState(true);
   const [renderedCardUrl, setRenderedCardUrl] = useState<string | null>(null);
+  const [downloadingCard, setDownloadingCard] = useState(false);
 
   // QR Code State
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -47,12 +57,14 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
   const [qrFullscreen, setQrFullscreen] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const nama = String(employee.nama ?? "-");
+  const nama = String(employee.nama ?? "Karyawan SPPG");
   const kodeKaryawan = String(employee.kode_karyawan ?? "-");
   const divisi = String(employee.divisi ?? "-");
   const jabatan = String(employee.jabatan_status ?? "-");
-  const statusQr = String(employee.status_qr ?? "Belum");
-  const tokenAbsensi = String(employee.token_absensi ?? "");
+  const statusQr = String(employee.status_qr ?? "Belum Dibuat");
+  const tokenAbsensi = employee.token_absensi
+    ? String(employee.token_absensi)
+    : "";
   const namaShift = String(employee.nama_shift ?? "-");
   const idUnik = String(employee.id_unik ?? "-");
 
@@ -63,20 +75,24 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
     .join("")
     .toUpperCase();
 
-  // 1. Muat Template ID Card Resmi dari SQLite lokal
+  // 1. Muat Template ID Card Resmi & Profil Instansi dari SQLite lokal
   useEffect(() => {
     let cancelled = false;
-    async function loadTemplate() {
+    async function loadTemplateAndCompany() {
       try {
-        const tpl = await getIdCardTemplate("default_template");
-        if (!cancelled && tpl) {
-          setTemplate(tpl);
+        const [tpl, comp] = await Promise.all([
+          getIdCardTemplate().catch(() => null),
+          getCompanyProfile().catch(() => null),
+        ]);
+        if (!cancelled) {
+          if (tpl) setTemplate(tpl);
+          if (comp) setCompanyProfile(comp);
         }
       } catch {
-        // Fallback ke mode default jika template gagal dibaca
+        // Fallback jika belum ada koneksi template
       }
     }
-    void loadTemplate();
+    void loadTemplateAndCompany();
     return () => {
       cancelled = true;
     };
@@ -86,28 +102,33 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
   useEffect(() => {
     let cancelled = false;
     async function generateQr() {
-      const payload = employeeQrPayload(employee);
-      if (!payload) {
+      if (!tokenAbsensi) {
         setQrStatus("no-token");
+        setQrDataUrl(null);
         return;
       }
+      setQrStatus("loading");
       try {
-        const dataUrl = await createQrPng(payload, 512);
+        const payload = employeeQrPayload(employee);
+        const url = await createQrPng(payload, 380);
         if (!cancelled) {
-          setQrDataUrl(dataUrl);
+          setQrDataUrl(url);
           setQrStatus("ready");
         }
       } catch {
-        if (!cancelled) setQrStatus("error");
+        if (!cancelled) {
+          setQrStatus("error");
+          setQrDataUrl(null);
+        }
       }
     }
     void generateQr();
     return () => {
       cancelled = true;
     };
-  }, [employee]);
+  }, [employee, tokenAbsensi]);
 
-  // 3. Render Canvas Template Kustom saat template atau sisi kartu berubah
+  // 3. Render Canvas Template Kustom saat template, company, atau sisi kartu berubah
   useEffect(() => {
     let cancelled = false;
     async function renderTemplateCanvas() {
@@ -117,11 +138,9 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
       }
       setTemplateRendering(true);
       try {
-        const url = await renderIdCardSideToCanvas({
-          template,
-          side: cardSide,
-          employee,
-          company: logoDataUrl
+        const activeCompany =
+          companyProfile ||
+          (logoDataUrl
             ? {
                 id: "default",
                 company_name: "SPPG",
@@ -139,7 +158,19 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
                 timezone: "Asia/Jakarta",
                 updated_at: "",
               }
-            : null,
+            : null);
+
+        await preloadCardAssets({
+          template,
+          company: activeCompany,
+          employee,
+        });
+
+        const url = await renderIdCardSideToCanvas({
+          template,
+          side: cardSide,
+          employee,
+          company: activeCompany,
           qrPngOverride: qrDataUrl || undefined,
           dpiScale: 1,
         });
@@ -156,7 +187,7 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
     return () => {
       cancelled = true;
     };
-  }, [template, cardSide, employee, logoDataUrl, qrDataUrl]);
+  }, [template, companyProfile, cardSide, employee, logoDataUrl, qrDataUrl]);
 
   const handleCopyToken = async () => {
     if (!tokenAbsensi) return;
@@ -170,6 +201,20 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
     }
   };
 
+  const handleDownloadCard = async () => {
+    if (!renderedCardUrl) return;
+    triggerHaptic("success");
+    setDownloadingCard(true);
+    try {
+      const filename = `ID-Card-${cardSide === "front" ? "Depan" : "Belakang"}-${nama.replace(/[^a-zA-Z0-9_-]/g, "_")}.png`;
+      await downloadDataUrl(renderedCardUrl, filename);
+    } catch {
+      // Handled
+    } finally {
+      setTimeout(() => setDownloadingCard(false), 2500);
+    }
+  };
+
   const hasCustomBg = Boolean(
     template?.frontBgUrl ||
       template?.backBgUrl ||
@@ -178,44 +223,42 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
 
   return (
     <>
-      {/* Sisi Kartu Toggle (Depan / Belakang) jika ada template kustom */}
-      {hasCustomBg ? (
-        <div className="flex items-center justify-between gap-2 mb-3">
-          <span className="text-xs font-bold text-slate-400">
-            Pratinjau Kartu ID
-          </span>
-          <div className="flex rounded-xl bg-slate-800/80 p-1 border border-white/10">
-            <button
-              type="button"
-              onClick={() => {
-                triggerHaptic("light");
-                setCardSide("front");
-              }}
-              className={`rounded-lg px-3 py-1 text-[11px] font-bold transition-all ${
-                cardSide === "front"
-                  ? "bg-sky-500 text-slate-950 shadow"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              Sisi Depan
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                triggerHaptic("light");
-                setCardSide("back");
-              }}
-              className={`rounded-lg px-3 py-1 text-[11px] font-bold transition-all ${
-                cardSide === "back"
-                  ? "bg-sky-500 text-slate-950 shadow"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              Sisi Belakang
-            </button>
-          </div>
+      {/* Sisi Kartu Toggle (Depan / Belakang) — Selalu Tampil */}
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <span className="text-xs font-bold text-slate-400">
+          Pratinjau Kartu ID
+        </span>
+        <div className="flex rounded-xl bg-slate-800/80 p-1 border border-white/10">
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic("light");
+              setCardSide("front");
+            }}
+            className={`rounded-lg px-3 py-1 text-[11px] font-bold transition-all ${
+              cardSide === "front"
+                ? "bg-sky-500 text-slate-950 shadow"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            Sisi Depan
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic("light");
+              setCardSide("back");
+            }}
+            className={`rounded-lg px-3 py-1 text-[11px] font-bold transition-all ${
+              cardSide === "back"
+                ? "bg-sky-500 text-slate-950 shadow"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            Sisi Belakang
+          </button>
         </div>
-      ) : null}
+      </div>
 
       {/* Render ID Card Kustom (jika template aktif dan berhasil di-render) */}
       {hasCustomBg && renderedCardUrl ? (
@@ -233,8 +276,8 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
             />
           )}
         </div>
-      ) : (
-        /* Fallback: Kartu Digital Modern SPPG */
+      ) : cardSide === "front" ? (
+        /* Fallback: Sisi Depan Kartu Digital Modern SPPG */
         <div className="relative overflow-hidden rounded-3xl border border-white/15 bg-gradient-to-br from-slate-900 via-slate-900/90 to-sky-950/60 p-5 shadow-2xl">
           {/* Glow Dekoratif Latar */}
           <div className="pointer-events-none absolute -right-12 -top-12 size-48 rounded-full bg-sky-500/10 blur-3xl" />
@@ -325,10 +368,59 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
             </div>
           </div>
         </div>
+      ) : (
+        /* Fallback: Sisi Belakang Kartu Digital Modern SPPG */
+        <div className="relative overflow-hidden rounded-3xl border border-white/15 bg-gradient-to-br from-slate-900 via-slate-900/90 to-slate-950 p-5 shadow-2xl min-h-[14rem] flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between border-b border-white/10 pb-2 mb-3">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
+                Ketentuan Penggunaan Kartu
+              </span>
+              <span className="text-[10px] font-mono text-slate-500">
+                SPPG SECURITY
+              </span>
+            </div>
+            <div className="space-y-1.5 text-[11px] text-slate-300">
+              <p>1. Kartu ini adalah tanda pengenal resmi karyawan SPPG.</p>
+              <p>2. Wajib dibawa dan digunakan saat melakukan scan absensi.</p>
+              <p>
+                3. Dilarang memindahtangankan atau memalsukan QR Code absensi.
+              </p>
+              <p>
+                4. Jika kartu ini hilang atau rusak, segera laporkan ke Admin.
+              </p>
+            </div>
+          </div>
+
+          <div className="pt-3 border-t border-white/10 flex items-center justify-between text-[10px] text-slate-500">
+            <span>ID Unik: {idUnik}</span>
+            <span className="font-semibold text-slate-400">
+              Sistem Absensi SPPG
+            </span>
+          </div>
+        </div>
       )}
 
       {/* Tombol Aksi di Bawah Kartu */}
       <div className="flex gap-2 mt-3">
+        {/* Unduh Gambar Kartu jika rendered */}
+        {renderedCardUrl && (
+          <button
+            type="button"
+            disabled={downloadingCard}
+            onClick={() => void handleDownloadCard()}
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/20 active:scale-95 transition disabled:opacity-40"
+          >
+            <Icon
+              name={downloadingCard ? "check" : "download"}
+              className="size-4"
+            />
+            {downloadingCard
+              ? "Tersimpan!"
+              : `Unduh ${cardSide === "front" ? "Depan" : "Belakang"}`}
+          </button>
+        )}
+
         {/* Perbesar QR */}
         <button
           type="button"

@@ -57,6 +57,8 @@ pub fn run() {
             mobile::commands::desktop_get_dashboard_data,
             mobile::commands::desktop_get_id_cards,
             mobile::commands::desktop_update_id_card,
+            mobile::commands::desktop_get_id_card_template,
+            mobile::commands::desktop_save_id_card_template,
             mobile::commands::desktop_get_geofence_settings,
             mobile::commands::desktop_update_geofence_settings,
             mobile::commands::desktop_get_scanner_settings,
@@ -81,6 +83,10 @@ pub fn run() {
             mobile::commands::desktop_save_turso_config,
             mobile::commands::desktop_test_turso_connection,
             mobile::commands::desktop_clear_turso_config,
+            mobile::commands::desktop_get_company_profile,
+            mobile::commands::desktop_update_company_profile,
+            mobile::commands::desktop_get_id_card_template,
+            mobile::commands::desktop_save_id_card_template,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
