@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-share-file"
+description = "Enables the desktop_share_file command without any pre-configured scope."
+commands.allow = ["desktop_share_file"]
+
+[[permission]]
+identifier = "deny-desktop-share-file"
+description = "Denies the desktop_share_file command without any pre-configured scope."
+commands.deny = ["desktop_share_file"]

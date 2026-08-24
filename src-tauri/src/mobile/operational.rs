@@ -1,3 +1,4 @@
+use base64::prelude::*;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -1144,30 +1145,13 @@ pub fn update_id_card(state: &MobileState, draft: &Value) -> Result<Value, Comma
 fn decode_base64(input: &str) -> Option<Vec<u8>> {
     let clean = if let Some(idx) = input.find(";base64,") {
         &input[idx + 8..]
+    } else if let Some(idx) = input.find(',') {
+        &input[idx + 1..]
     } else {
         input.trim()
     };
-    let mut out = Vec::new();
-    let mut buf: u32 = 0;
-    let mut bits: u32 = 0;
-    for &b in clean.as_bytes() {
-        let val = match b {
-            b'A'..=b'Z' => b - b'A',
-            b'a'..=b'z' => b - b'a' + 26,
-            b'0'..=b'9' => b - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' | b'\r' | b'\n' | b' ' => continue,
-            _ => return None,
-        };
-        buf = (buf << 6) | (val as u32);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((buf >> bits) & 0xFF) as u8);
-        }
-    }
-    Some(out)
+    let clean: String = clean.chars().filter(|c| !c.is_whitespace()).collect();
+    BASE64_STANDARD.decode(&clean).ok()
 }
 
 pub fn save_desktop_file(filename: &str, base64_data: &str) -> Result<Value, CommandError> {
@@ -1220,6 +1204,29 @@ pub fn save_desktop_file(filename: &str, base64_data: &str) -> Result<Value, Com
         "DESKTOP_SAVE_FAILED",
         &format!("Gagal menulis file ke media penyimpanan: {}", last_error),
     ))
+}
+
+pub fn share_desktop_file(filename: &str, base64_data: &str, title: Option<&str>) -> Result<Value, CommandError> {
+    let bytes = decode_base64(base64_data).ok_or_else(|| {
+        CommandError::new("SHARE_FAILED", "Format base64 file tidak valid.")
+    })?;
+
+    let sanitized_filename = filename.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    let share_dir = std::env::temp_dir().join("sppg_share");
+    if !share_dir.exists() {
+        let _ = std::fs::create_dir_all(&share_dir);
+    }
+    let target_path = share_dir.join(&sanitized_filename);
+    std::fs::write(&target_path, &bytes).map_err(|e| {
+        CommandError::new("SHARE_FAILED", &format!("Gagal menyiapkan file untuk dibagikan: {}", e))
+    })?;
+
+    Ok(json!({
+        "sukses": true,
+        "path": target_path.to_string_lossy().to_string(),
+        "filename": sanitized_filename,
+        "title": title.unwrap_or("ID Card SPPG")
+    }))
 }
 
 pub fn list_holidays(state: &MobileState) -> Result<Value, CommandError> {
@@ -2266,27 +2273,30 @@ pub fn get_id_card_template(state: &MobileState, id: &str) -> Result<Value, Comm
             |row| {
                 let elements_raw: String = row.get::<_, Option<String>>(5)?.unwrap_or_default();
                 let mut elements: Value = serde_json::from_str(&elements_raw).unwrap_or_else(|_| json!([]));
-                if let Value::String(inner_str) = &elements {
+                while let Value::String(inner_str) = &elements {
                     if let Ok(nested) = serde_json::from_str::<Value>(inner_str) {
                         elements = nested;
-                    }
-                }
-                if let Value::String(inner_str2) = &elements {
-                    if let Ok(nested2) = serde_json::from_str::<Value>(inner_str2) {
-                        elements = nested2;
+                    } else {
+                        break;
                     }
                 }
                 if elements.as_array().map(|a| a.is_empty()).unwrap_or(true) {
                     elements = default_id_card_elements();
                 }
+                let front_bg = row.get::<_, Option<String>>(3)?;
+                let back_bg = row.get::<_, Option<String>>(4)?;
+                let is_active = row.get::<_, i64>(6)? != 0;
                 Ok(json!({
                     "id": row.get::<_, String>(0)?,
                     "name": row.get::<_, String>(1)?,
                     "orientation": row.get::<_, String>(2)?,
-                    "frontBgUrl": row.get::<_, Option<String>>(3)?,
-                    "backBgUrl": row.get::<_, Option<String>>(4)?,
+                    "frontBgUrl": front_bg,
+                    "front_bg_url": front_bg,
+                    "backBgUrl": back_bg,
+                    "back_bg_url": back_bg,
                     "elements": elements,
-                    "isActive": row.get::<_, i64>(6)? != 0,
+                    "isActive": is_active,
+                    "is_active": is_active,
                     "createdAt": row.get::<_, Option<String>>(7)?,
                     "updatedAt": row.get::<_, Option<String>>(8)?,
                 }))
@@ -2352,13 +2362,62 @@ pub fn save_id_card_template(state: &MobileState, template: &Value) -> Result<Va
     } else {
         "landscape"
     };
-    let front_bg_url = text(template, "frontBgUrl");
-    let back_bg_url = text(template, "backBgUrl");
-    let elements = template.get("elements").cloned().unwrap_or(json!([]));
-    let elements_json = serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string());
+    let front_bg_url = if let Some(s) = template
+        .get("frontBgUrl")
+        .or_else(|| template.get("front_bg_url"))
+        .and_then(Value::as_str)
+    {
+        s.trim()
+    } else {
+        ""
+    };
+    let back_bg_url = if let Some(s) = template
+        .get("backBgUrl")
+        .or_else(|| template.get("back_bg_url"))
+        .and_then(Value::as_str)
+    {
+        s.trim()
+    } else {
+        ""
+    };
+    let elements_raw = template
+        .get("elements")
+        .or_else(|| template.get("elements_json"))
+        .cloned()
+        .unwrap_or(json!([]));
+    let mut normalized_elements = elements_raw;
+    while let Value::String(ref s) = normalized_elements {
+        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+            normalized_elements = parsed;
+        } else {
+            break;
+        }
+    }
+    let elements_json = if normalized_elements.is_array() || normalized_elements.is_object() {
+        serde_json::to_string(&normalized_elements).unwrap_or_else(|_| "[]".to_string())
+    } else if let Value::String(ref s) = normalized_elements {
+        if s.trim().is_empty() {
+            "[]".to_string()
+        } else {
+            s.clone()
+        }
+    } else {
+        "[]".to_string()
+    };
     let is_active = if template
         .get("isActive")
-        .and_then(Value::as_bool)
+        .or_else(|| template.get("is_active"))
+        .and_then(|v| {
+            if let Some(b) = v.as_bool() {
+                Some(b)
+            } else if let Some(n) = v.as_i64() {
+                Some(n != 0)
+            } else if let Some(s) = v.as_str() {
+                Some(s == "1" || s.eq_ignore_ascii_case("true"))
+            } else {
+                None
+            }
+        })
         .unwrap_or(true)
     {
         1
@@ -2403,7 +2462,7 @@ pub fn save_id_card_template(state: &MobileState, template: &Value) -> Result<Va
         "orientation": orientation,
         "front_bg_url": if front_bg_url.is_empty() { Value::Null } else { Value::String(front_bg_url.to_string()) },
         "back_bg_url": if back_bg_url.is_empty() { Value::Null } else { Value::String(back_bg_url.to_string()) },
-        "elements_json": elements,
+        "elements_json": elements_json,
         "is_active": is_active,
         "created_at": now,
         "updated_at": now,

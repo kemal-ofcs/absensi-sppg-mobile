@@ -59,6 +59,8 @@ pub fn run() {
             mobile::commands::desktop_update_id_card,
             mobile::commands::desktop_get_id_card_template,
             mobile::commands::desktop_save_id_card_template,
+            mobile::commands::desktop_force_resync_settings,
+            mobile::commands::desktop_debug_template_sync,
             mobile::commands::desktop_get_geofence_settings,
             mobile::commands::desktop_update_geofence_settings,
             mobile::commands::desktop_get_scanner_settings,
@@ -70,6 +72,7 @@ pub fn run() {
             mobile::commands::desktop_resolve_sync_conflicts,
             mobile::commands::desktop_clear_failed_sync,
             mobile::commands::desktop_save_file,
+            mobile::commands::desktop_share_file,
             mobile::commands::desktop_get_holidays,
             mobile::commands::desktop_create_holiday,
             mobile::commands::desktop_update_holiday,
@@ -85,8 +88,6 @@ pub fn run() {
             mobile::commands::desktop_clear_turso_config,
             mobile::commands::desktop_get_company_profile,
             mobile::commands::desktop_update_company_profile,
-            mobile::commands::desktop_get_id_card_template,
-            mobile::commands::desktop_save_id_card_template,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

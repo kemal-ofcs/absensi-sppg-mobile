@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Icon } from "@/components/ui/Icon";
 import { downloadDataUrl } from "@/lib/client/download";
 import { triggerHaptic } from "@/lib/client/haptics";
+import { shareDataUrl } from "@/lib/client/share";
 
 interface QrFullscreenDialogProps {
   /** Data URL base64 dari QR Code yang akan ditampilkan. */
@@ -53,55 +54,39 @@ export function QrFullscreenDialog({
   const cleanFilename = `QR-Absensi-${employeeName.replace(/[^a-zA-Z0-9_-]/g, "_")}.png`;
 
   const handleDownload = async () => {
-    triggerHaptic("success");
     try {
       const res = await downloadDataUrl(qrDataUrl, cleanFilename);
-      if (res.sukses) {
-        setSaveStatus("Tersimpan di Download!");
-        setTimeout(() => setSaveStatus(null), 3000);
-      }
-    } catch {
-      setSaveStatus("Gagal Menyimpan");
+      triggerHaptic("success");
+      setSaveStatus(
+        res.path ? `Tersimpan di ${res.path}` : "Tersimpan di Download!",
+      );
+      setTimeout(() => setSaveStatus(null), 3000);
+    } catch (err) {
+      triggerHaptic("error");
+      setSaveStatus(err instanceof Error ? err.message : "Gagal Menyimpan");
       setTimeout(() => setSaveStatus(null), 3000);
     }
   };
 
   const handleShare = async () => {
-    triggerHaptic("light");
     setSharing(true);
     try {
-      if (
-        typeof navigator !== "undefined" &&
-        typeof navigator.share === "function"
-      ) {
-        try {
-          const res = await fetch(qrDataUrl);
-          const blob = await res.blob();
-          const file = new File([blob], cleanFilename, { type: "image/png" });
-
-          if (navigator.canShare?.({ files: [file] })) {
-            await navigator.share({
-              title: `QR Code Absensi - ${employeeName}`,
-              text: `QR Code Absensi SPPG untuk ${employeeName}`,
-              files: [file],
-            });
-            return;
-          }
-          await navigator.share({
-            title: `QR Code Absensi - ${employeeName}`,
-            text: `QR Code Absensi SPPG untuk ${employeeName}`,
-          });
-          return;
-        } catch (shareErr) {
-          if ((shareErr as Error)?.name === "AbortError") {
-            return;
-          }
-        }
+      const title = `QR Code Absensi - ${employeeName}`;
+      const text = `QR Code Absensi SPPG untuk ${employeeName}`;
+      const res = await shareDataUrl(qrDataUrl, cleanFilename, title, text);
+      if (res.sukses) {
+        triggerHaptic("success");
+        setSaveStatus(res.message || "Berhasil Membagikan");
+        setTimeout(() => setSaveStatus(null), 3000);
+      } else if (!res.cancelled) {
+        triggerHaptic("error");
+        setSaveStatus(res.message || "Gagal Membagikan");
+        setTimeout(() => setSaveStatus(null), 3000);
       }
-      // Fallback: Unduh jika Web Share tidak tersedia
-      await handleDownload();
-    } catch {
-      // Handled
+    } catch (err) {
+      triggerHaptic("error");
+      setSaveStatus(err instanceof Error ? err.message : "Gagal Membagikan");
+      setTimeout(() => setSaveStatus(null), 3000);
     } finally {
       setSharing(false);
     }

@@ -8,6 +8,183 @@ import type {
   IdCardTemplateConfig,
 } from "@/types/id-card";
 
+export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
+  {
+    id: "el-company-logo",
+    type: "company_logo",
+    side: "front",
+    sourceKey: "company.logo",
+    label: "Logo Instansi",
+    x: 6,
+    y: 8,
+    width: 14,
+    height: 20,
+    fontSize: 14,
+    color: "#ffffff",
+    visible: true,
+  },
+  {
+    id: "el-header-company",
+    type: "text",
+    side: "front",
+    sourceKey: "company.name",
+    label: "Nama Instansi",
+    x: 22,
+    y: 11,
+    fontSize: 16,
+    fontWeight: "bold",
+    color: "#ffffff",
+    textAlign: "left",
+    isUppercase: true,
+    visible: true,
+  },
+  {
+    id: "el-header-title",
+    type: "static_text",
+    side: "front",
+    sourceKey: "static_text",
+    staticValue: "KARTU IDENTITAS KARYAWAN",
+    label: "Judul Kartu",
+    x: 22,
+    y: 22,
+    fontSize: 9,
+    fontWeight: "600",
+    color: "#38bdf8",
+    textAlign: "left",
+    isUppercase: true,
+    visible: true,
+  },
+  {
+    id: "el-emp-name",
+    type: "text",
+    side: "front",
+    sourceKey: "employee.name",
+    label: "Nama Karyawan",
+    x: 6,
+    y: 44,
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#ffffff",
+    textAlign: "left",
+    isUppercase: true,
+    visible: true,
+  },
+  {
+    id: "el-emp-pos",
+    type: "text",
+    side: "front",
+    sourceKey: "employee.position",
+    label: "Jabatan / Posisi",
+    x: 6,
+    y: 56,
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#7dd3fc",
+    textAlign: "left",
+    visible: true,
+  },
+  {
+    id: "el-emp-dept",
+    type: "text",
+    side: "front",
+    sourceKey: "employee.department",
+    label: "Divisi / Unit",
+    x: 6,
+    y: 67,
+    fontSize: 11,
+    color: "#cbd5e1",
+    textAlign: "left",
+    visible: true,
+  },
+  {
+    id: "el-emp-nik",
+    type: "text",
+    side: "front",
+    sourceKey: "employee.nik",
+    label: "NIK / Kode",
+    x: 6,
+    y: 78,
+    fontSize: 10,
+    color: "#94a3b8",
+    textAlign: "left",
+    visible: true,
+  },
+  {
+    id: "el-emp-qr",
+    type: "qr_code",
+    side: "front",
+    sourceKey: "employee.qr_token",
+    label: "QR Code Token",
+    x: 68,
+    y: 30,
+    width: 26,
+    height: 48,
+    fontSize: 10,
+    color: "#000000",
+    visible: true,
+  },
+  {
+    id: "el-back-title",
+    type: "static_text",
+    side: "back",
+    sourceKey: "static_text",
+    staticValue: "KETENTUAN PENGGUNAAN KARTU",
+    label: "Judul Belakang",
+    x: 8,
+    y: 12,
+    fontSize: 12,
+    fontWeight: "bold",
+    color: "#ffffff",
+    textAlign: "left",
+    isUppercase: true,
+    visible: true,
+  },
+  {
+    id: "el-back-terms",
+    type: "text",
+    side: "back",
+    sourceKey: "company.terms",
+    label: "Syarat & Ketentuan",
+    x: 8,
+    y: 24,
+    width: 84,
+    height: 42,
+    fontSize: 8.5,
+    color: "#cbd5e1",
+    textAlign: "left",
+    visible: true,
+  },
+  {
+    id: "el-back-sig",
+    type: "company_logo",
+    side: "back",
+    sourceKey: "company.signature",
+    label: "Tanda Tangan Pimpinan",
+    x: 66,
+    y: 68,
+    width: 26,
+    height: 18,
+    fontSize: 10,
+    color: "#ffffff",
+    visible: true,
+  },
+  {
+    id: "el-back-leader",
+    type: "static_text",
+    side: "back",
+    sourceKey: "static_text",
+    staticValue: "Pimpinan Instansi",
+    label: "Label Pimpinan",
+    x: 66,
+    y: 88,
+    fontSize: 8,
+    fontWeight: "600",
+    color: "#94a3b8",
+    textAlign: "center",
+    visible: true,
+  },
+];
+
 // Memory caches to eliminate async lag & re-render latency
 const imageCache = new Map<string, HTMLImageElement>();
 const qrCache = new Map<string, HTMLImageElement>();
@@ -26,13 +203,19 @@ export function preloadImage(src: string): Promise<HTMLImageElement> {
   }
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.crossOrigin = "anonymous";
+    if (!src.startsWith("data:") && !src.startsWith("blob:")) {
+      img.crossOrigin = "anonymous";
+    }
     img.onload = () => {
       imageCache.set(src, img);
       resolve(img);
     };
     img.onerror = () => reject(new Error("Gagal memuat gambar"));
     img.src = src;
+    if (img.complete && img.naturalWidth > 0) {
+      imageCache.set(src, img);
+      resolve(img);
+    }
   });
 }
 
@@ -186,7 +369,11 @@ export async function drawIdCardToCanvas(
   }
 
   // 2. Filter elements for this side (only if visible !== false)
-  const elements = (template.elements || []).filter(
+  const rawElements =
+    Array.isArray(template.elements) && template.elements.length > 0
+      ? template.elements
+      : DEFAULT_ID_CARD_ELEMENTS;
+  const elements = rawElements.filter(
     (el) => el.side === side && el.visible !== false,
   );
 

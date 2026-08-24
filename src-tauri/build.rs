@@ -55,6 +55,7 @@ const MOBILE_COMMANDS: &[&str] = &[
     "desktop_resolve_sync_conflicts",
     "desktop_clear_failed_sync",
     "desktop_save_file",
+    "desktop_share_file",
     "desktop_get_holidays",
     "desktop_create_holiday",
     "desktop_update_holiday",

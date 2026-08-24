@@ -35,14 +35,14 @@ export function Modal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-[80] flex items-center justify-center p-3 sm:p-4 bg-slate-950/90 backdrop-blur-md animate-in fade-in duration-200">
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
         onKeyDown={handleContainerKeyDown}
-        className={`flex flex-col w-full ${maxWidth} max-h-[88vh] rounded-3xl border border-white/15 bg-slate-900/98 shadow-2xl backdrop-blur-2xl overflow-hidden transition-all`}
+        className={`flex flex-col w-full ${maxWidth} max-h-[85dvh] rounded-3xl border border-white/15 bg-slate-900/98 shadow-2xl backdrop-blur-2xl overflow-hidden transition-all my-auto`}
       >
         {/* Sticky Modal Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 shrink-0 bg-slate-900/95">

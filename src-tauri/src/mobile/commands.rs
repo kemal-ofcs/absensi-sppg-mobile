@@ -1014,6 +1014,15 @@ pub fn desktop_save_file(filename: String, base64_data: String) -> Result<Value,
 }
 
 #[tauri::command]
+pub fn desktop_share_file(
+    filename: String,
+    base64_data: String,
+    title: Option<String>,
+) -> Result<Value, CommandError> {
+    operational::share_desktop_file(&filename, &base64_data, title.as_deref())
+}
+
+#[tauri::command]
 pub fn desktop_get_holidays(state: State<'_, MobileState>) -> Result<Value, CommandError> {
     require_permission(&state, "holidays.view")?;
     operational::list_holidays(&state)
@@ -1075,7 +1084,6 @@ pub fn desktop_get_id_card_template(
     state: State<'_, MobileState>,
     id: Option<String>,
 ) -> Result<Value, CommandError> {
-    require_permission(&state, "employees.view")?;
     operational::get_id_card_template(&state, id.as_deref().unwrap_or("default_template"))
 }
 
@@ -1086,6 +1094,74 @@ pub fn desktop_save_id_card_template(
 ) -> Result<Value, CommandError> {
     require_permission(&state, "employees.manage")?;
     operational::save_id_card_template(&state, &template)
+}
+
+#[tauri::command]
+pub async fn desktop_force_resync_settings(
+    state: State<'_, MobileState>,
+) -> Result<Value, CommandError> {
+    let token = {
+        let session = state.session.lock().map_err(|_| CommandError::internal())?;
+        let session = session.as_ref().ok_or_else(|| {
+            CommandError::new(
+                "DESKTOP_SESSION_MISSING",
+                "Session Mobile tidak tersedia. Silakan login kembali.",
+            )
+        })?;
+        if !session
+            .operator
+            .permissions
+            .iter()
+            .any(|permission| permission == "sync.view")
+        {
+            return Err(CommandError::new(
+                "DESKTOP_ACCESS_DENIED",
+                "Akses sinkronisasi ditolak.",
+            ));
+        }
+        session
+            .token
+            .as_ref()
+            .map(|value| value.to_string())
+            .ok_or_else(|| {
+                CommandError::new(
+                    "DESKTOP_ONLINE_REQUIRED",
+                    "Login online diperlukan untuk sinkronisasi ulang pengaturan.",
+                )
+            })?
+    };
+
+    let enqueue_result = operational::force_enqueue_settings(&state)?;
+
+    let sync_result = sync::synchronize(&state, &token).await;
+    if let Err(error) = &sync_result {
+        clear_expired_session(&state, error);
+    }
+    let status = sync_result?;
+
+    Ok(json!({
+        "enqueue": enqueue_result,
+        "status": status,
+    }))
+}
+
+#[tauri::command]
+pub async fn desktop_debug_template_sync(
+    state: State<'_, MobileState>,
+) -> Result<Value, CommandError> {
+    let local_tpl = operational::get_id_card_template(&state, "default_template")?;
+    let cloud_tpl: Option<Value> = if let Ok(turso) = state.get_turso_client() {
+        turso.query_one(
+            "SELECT id, name, orientation, front_bg_url, back_bg_url, elements_json, is_active, updated_at FROM id_card_template WHERE id = 'default_template';",
+            vec![],
+        ).await.ok().and_then(|res| res.to_objects().into_iter().next().map(|map| json!(map)))
+    } else {
+        None
+    };
+    Ok(json!({
+        "local": local_tpl,
+        "cloud": cloud_tpl,
+    }))
 }
 
 #[tauri::command]
