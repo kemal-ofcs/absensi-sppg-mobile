@@ -1,8 +1,8 @@
 import type { Client } from "@libsql/client";
 import { runDatabaseMigrations } from "./db-migrations";
 
-export const CURRENT_SCHEMA_VERSION = 8;
-export const REQUIRED_TABLE_COUNT = 21;
+export const CURRENT_SCHEMA_VERSION = 10;
+export const REQUIRED_TABLE_COUNT = 31;
 
 export async function isDatabaseSchemaReady(client: Client) {
   try {
@@ -18,7 +18,10 @@ export async function isDatabaseSchemaReady(client: Client) {
             'app_permission', 'role_permission', 'app_session',
             'auth_login_rate_limit', 'sync_operation_receipt',
             'sync_change_log', 'sync_changelog', 'app_bootstrap_state',
-            'import_offline', 'tbl_hari_libur'
+            'import_offline', 'tbl_hari_libur',
+            'company_profile', 'id_card_template',
+            'salary_configs', 'overtime_tier_rules', 'payroll_components',
+            'tax_rules', 'bpjs_rules', 'payroll_runs', 'payroll_items', 'payroll_audit_logs'
           )
         ) AS table_count;
     `);

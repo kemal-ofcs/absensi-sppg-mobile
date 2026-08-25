@@ -47,6 +47,10 @@
     "allow-desktop-get-dashboard-data",
     "allow-desktop-get-id-cards",
     "allow-desktop-update-id-card",
+    "allow-desktop-get-id-card-template",
+    "allow-desktop-save-id-card-template",
+    "allow-desktop-force-resync-settings",
+    "allow-desktop-debug-template-sync",
     "allow-desktop-get-geofence-settings",
     "allow-desktop-update-geofence-settings",
     "allow-desktop-get-scanner-settings",
@@ -56,6 +60,7 @@
     "allow-desktop-get-sync-conflicts",
     "allow-desktop-retry-failed-sync",
     "allow-desktop-resolve-sync-conflicts",
+    "allow-desktop-resolve-sync-conflicts-local",
     "allow-desktop-clear-failed-sync",
     "allow-desktop-save-file",
     "allow-desktop-get-holidays",
@@ -70,6 +75,8 @@
     "allow-desktop-get-turso-url",
     "allow-desktop-save-turso-config",
     "allow-desktop-test-turso-connection",
-    "allow-desktop-clear-turso-config"
+    "allow-desktop-clear-turso-config",
+    "allow-mobile-get-my-payroll-slips",
+    "allow-mobile-get-payroll-slip-detail"
   ]
 }

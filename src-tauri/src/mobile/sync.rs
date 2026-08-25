@@ -296,6 +296,159 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         entity_column: "id_log",
         delete_missing: false,
     },
+    SnapshotTable {
+        payload_key: "salaryConfigs",
+        domain: "payroll",
+        table: "salary_configs",
+        columns: &[
+            "id",
+            "id_karyawan",
+            "rate_per_hour",
+            "ptkp_status",
+            "effective_date",
+            "created_by",
+            "created_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "overtimeTierRules",
+        domain: "payroll",
+        table: "overtime_tier_rules",
+        columns: &[
+            "id",
+            "rule_type",
+            "tier_order",
+            "hour_start",
+            "hour_end",
+            "multiplier",
+            "is_active",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "payrollComponents",
+        domain: "payroll",
+        table: "payroll_components",
+        columns: &[
+            "id",
+            "name",
+            "category",
+            "calc_type",
+            "default_value",
+            "applies_to",
+            "is_active",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "taxRules",
+        domain: "payroll",
+        table: "tax_rules",
+        columns: &[
+            "id",
+            "category",
+            "bracket_min",
+            "bracket_max",
+            "rate_percentage",
+            "effective_date",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "bpjsRules",
+        domain: "payroll",
+        table: "bpjs_rules",
+        columns: &[
+            "id",
+            "component_code",
+            "component_name",
+            "rate_percentage",
+            "wage_cap",
+            "effective_date",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "payrollRuns",
+        domain: "payroll",
+        table: "payroll_runs",
+        columns: &[
+            "id",
+            "idempotency_key",
+            "period_start",
+            "period_end",
+            "status",
+            "total_gross_payout",
+            "total_net_payout",
+            "total_employees",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "payrollItems",
+        domain: "payroll",
+        table: "payroll_items",
+        columns: &[
+            "id",
+            "payroll_run_id",
+            "id_karyawan",
+            "nama_karyawan",
+            "divisi",
+            "ptkp_status",
+            "total_regular_hours",
+            "total_overtime_hours",
+            "total_overtime_index",
+            "rate_per_hour",
+            "basic_salary",
+            "overtime_salary",
+            "gross_salary",
+            "total_allowances",
+            "total_deductions",
+            "bpjs_employee_total",
+            "bpjs_company_total",
+            "pph21_amount",
+            "net_salary",
+            "breakdown_snapshot",
+            "created_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "payrollAuditLogs",
+        domain: "payroll",
+        table: "payroll_audit_logs",
+        columns: &[
+            "id",
+            "payroll_run_id",
+            "action",
+            "old_status",
+            "new_status",
+            "performed_by",
+            "notes",
+            "created_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
 ];
 
 const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
@@ -320,6 +473,14 @@ const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
     ("log-scan", "delete"),
     ("offline-import", "delete"),
     ("offline-import", "row"),
+    ("payroll", "bpjs-rule"),
+    ("payroll", "create-run"),
+    ("payroll", "delete"),
+    ("payroll", "overtime-rule"),
+    ("payroll", "payroll-component"),
+    ("payroll", "salary-config"),
+    ("payroll", "tax-rule"),
+    ("payroll", "transition-status"),
     ("setting", "update"),
     ("setting", "upsert"),
     ("shift", "create"),
@@ -651,8 +812,8 @@ fn apply_table(
 }
 
 pub fn ensure_client_id(state: &MobileState) -> Result<String, CommandError> {
-    let connection = storage::database(&state.data_dir)?;
     let server_origin = state.server_origin();
+    let connection = storage::database(&state.data_dir)?;
     if let Ok(client_id) = connection.query_row(
         "SELECT client_id FROM desktop_client_identity WHERE server_origin = ?;",
         [&server_origin],
@@ -735,9 +896,10 @@ pub fn enqueue(
         .execute(
             r#"
       INSERT INTO desktop_sync_outbox (
-        event_id, client_id, domain, operation, entity_key, payload_json,
-        base_revision, status, attempt_count, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?);
+        event_id, client_id, domain, operation, entity_key,
+        payload_json, base_revision, status, attempt_count,
+        next_retry_at, last_error, server_revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, ?, ?);
       "#,
             params![
                 event_id,
@@ -756,6 +918,16 @@ pub fn enqueue(
 }
 
 pub fn apply_snapshot(state: &MobileState, payload: &Value) -> Result<(), CommandError> {
+    // Pastikan skema lokal sudah memuat seluruh tabel snapshot terbaru (mis. id_card_template,
+    // company_profile) sebelum menerapkan data server. Tanpa ini, client dengan skema lokal yang
+    // tertinggal (belum sempat relaunch sejak tabel baru ditambahkan) akan gagal total di tengah
+    // transaksi apply_table dan me-rollback SELURUH snapshot, bukan hanya tabel yang hilang.
+    storage::initialize(&state.data_dir).map_err(|_| {
+        CommandError::new(
+            "DESKTOP_SCHEMA_MIGRATION_FAILED",
+            "Skema database lokal tidak dapat disiapkan sebelum menerapkan snapshot sinkronisasi.",
+        )
+    })?;
     let snapshot = payload.get("snapshot").unwrap_or(payload);
     let revision = snapshot
         .get("revision")
@@ -1496,6 +1668,45 @@ pub fn resolve_conflicts(state: &MobileState, event_id: Option<&str>) -> Result<
     transaction.commit().map_err(|_| CommandError::internal())
 }
 
+pub fn resolve_conflicts_local(
+    state: &MobileState,
+    event_id: Option<&str>,
+) -> Result<(), CommandError> {
+    let mut connection = storage::database(&state.data_dir)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|_| CommandError::internal())?;
+    let now = storage::now_epoch_seconds();
+    if let Some(event_id) = event_id {
+        transaction
+            .execute(
+                "DELETE FROM desktop_sync_conflict WHERE event_id = ?;",
+                params![event_id],
+            )
+            .map_err(|_| CommandError::internal())?;
+        transaction
+            .execute(
+                "UPDATE desktop_sync_outbox SET status = 'pending', base_revision = NULL, attempt_count = 0, last_error = NULL, updated_at = ? WHERE event_id = ? AND status = 'conflict';",
+                params![now, event_id],
+            )
+            .map_err(|_| CommandError::internal())?;
+    } else {
+        transaction
+            .execute(
+                "DELETE FROM desktop_sync_conflict;",
+                [],
+            )
+            .map_err(|_| CommandError::internal())?;
+        transaction
+            .execute(
+                "UPDATE desktop_sync_outbox SET status = 'pending', base_revision = NULL, attempt_count = 0, last_error = NULL, updated_at = ? WHERE status = 'conflict';",
+                [now],
+            )
+            .map_err(|_| CommandError::internal())?;
+    }
+    transaction.commit().map_err(|_| CommandError::internal())
+}
+
 pub fn clear_failed(state: &MobileState, event_id: Option<&str>) -> Result<(), CommandError> {
     let connection = storage::database(&state.data_dir)?;
     let now = storage::now_epoch_seconds();
@@ -1519,7 +1730,7 @@ pub fn clear_failed(state: &MobileState, event_id: Option<&str>) -> Result<(), C
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Mutex, RwLock};
 
     use reqwest::Client;
     use serde_json::{json, Value};
@@ -1534,11 +1745,11 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         storage::initialize(directory.path()).expect("local schema");
         let state = MobileState {
-            server_origin: std::sync::RwLock::new("http://localhost:3000".into()),
+            server_origin: RwLock::new("http://localhost:3000".to_string()),
             offline_max_age_hours: 24,
             data_dir: directory.path().to_path_buf(),
             http: Client::new(),
-            turso_config: std::sync::RwLock::new(None),
+            turso_config: RwLock::new(None),
             session: Mutex::new(None),
             vault_lock: Mutex::new(()),
         };
@@ -1692,6 +1903,55 @@ mod tests {
             )
             .expect("server shift name");
         assert_eq!(server_name, "Shift Server");
+    }
+
+    #[test]
+    fn apply_snapshot_self_heals_a_stale_local_schema_missing_a_snapshot_table() {
+        let (_directory, state) = fixture();
+        {
+            let connection = storage::database(&state.data_dir).expect("local database");
+            connection
+                .execute("DROP TABLE id_card_template;", [])
+                .expect("simulate stale schema predating id_card_template");
+        }
+
+        let snapshot = json!({
+            "snapshot": {
+                "revision": 5,
+                "employees": [],
+                "idCards": [],
+                "shifts": [],
+                "settings": [],
+                "idCardTemplates": [{
+                    "id": "default_template",
+                    "name": "Template Kantor",
+                    "orientation": "portrait",
+                    "front_bg_url": "data:image/png;base64,AAAA",
+                    "back_bg_url": null,
+                    "elements_json": "[]",
+                    "is_active": 1,
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "updated_at": "2026-01-01T00:00:00.000Z"
+                }],
+                "backups": [],
+                "corrections": [],
+                "imports": [],
+                "attendance": [],
+                "scanLogs": []
+            }
+        });
+
+        apply_snapshot(&state, &snapshot).expect("snapshot applies after self-healing schema");
+
+        let connection = storage::database(&state.data_dir).expect("local database");
+        let name: String = connection
+            .query_row(
+                "SELECT name FROM id_card_template WHERE id = 'default_template';",
+                [],
+                |row| row.get(0),
+            )
+            .expect("recreated table has the pulled template row");
+        assert_eq!(name, "Template Kantor");
     }
 
     #[test]

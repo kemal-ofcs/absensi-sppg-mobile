@@ -22,6 +22,7 @@ export function MobileBottomNav() {
   const canKaryawan = canAccessArea(user, "karyawan");
   const canScanner = canAccessArea(user, "scanner");
   const canHistory = canAccessArea(user, "history");
+  const canPayroll = canAccessArea(user, "payroll");
 
   const navItems: NavItem[] = [];
 
@@ -41,6 +42,9 @@ export function MobileBottomNav() {
   }
   if (canHistory) {
     navItems.push({ href: "/history", icon: "clock", label: "Riwayat" });
+  }
+  if (canPayroll) {
+    navItems.push({ href: "/payroll", icon: "document", label: "Slip Gaji" });
   }
   navItems.push({ href: "/settings", icon: "settings", label: "Pengaturan" });
 

@@ -6,6 +6,10 @@ import { useEffect, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
 import { canAccessArea, hasPermission } from "@/lib/auth/access";
+import {
+  calculateDistanceMeters,
+  getCurrentCoordinates,
+} from "@/lib/client/geolocation";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
 import {
@@ -21,6 +25,7 @@ import {
   testTursoConnection,
 } from "@/lib/gateways/turso-config";
 import { useOnlineStatus } from "@/lib/hooks/useOnlineStatus";
+import { validateGeofenceSettings } from "@/lib/validations/geofence";
 
 export default function SettingsPage() {
   const { user, isAuthenticated, isLoading: authLoading, logout } = useAuth();
@@ -79,8 +84,17 @@ export default function SettingsPage() {
         })
         .catch(() => undefined);
     }
+
+    const onSyncCompleted = () => {
+      if (isAuthenticated && canManageGeofence) {
+        void loadGeofence();
+      }
+    };
+    window.addEventListener("sppg:sync-completed", onSyncCompleted);
+
     return () => {
       cancelled = true;
+      window.removeEventListener("sppg:sync-completed", onSyncCompleted);
     };
   }, [isAuthenticated, canManageGeofence, user?.isSuperadmin]);
 
@@ -89,6 +103,69 @@ export default function SettingsPage() {
     if (confirm("Apakah Anda yakin ingin keluar dari akun operator ini?")) {
       await logout();
       router.replace("/login");
+    }
+  };
+
+  const [currentDeviceCoords, setCurrentDeviceCoords] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
+  const [geofenceBusy, setGeofenceBusy] = useState(false);
+
+  const handleUseCurrentLocation = async () => {
+    setGeofenceBusy(true);
+    triggerHaptic("light");
+    const coordinates = await getCurrentCoordinates();
+    setGeofenceBusy(false);
+    if (!coordinates) {
+      triggerHaptic("error");
+      setSaveMessage(
+        "Lokasi GPS tidak dapat dideteksi. Pastikan GPS/Location HP aktif dan izin lokasi diizinkan.",
+      );
+      setTimeout(() => setSaveMessage(""), 4000);
+      return;
+    }
+    setCurrentDeviceCoords({
+      lat: coordinates.lat,
+      lng: coordinates.lng,
+    });
+    setGeofence((curr) => ({
+      ...curr,
+      latitude: Number(coordinates.lat.toFixed(7)),
+      longitude: Number(coordinates.lng.toFixed(7)),
+    }));
+    triggerHaptic("success");
+    setSaveMessage("Koordinat GPS HP berhasil dimasukkan ke form.");
+    setTimeout(() => setSaveMessage(""), 3000);
+  };
+
+  const handleSaveGeofence = async () => {
+    const errors = validateGeofenceSettings(geofence);
+    const firstError = Object.values(errors)[0];
+    if (firstError) {
+      triggerHaptic("error");
+      setSaveMessage(firstError);
+      setTimeout(() => setSaveMessage(""), 3000);
+      return;
+    }
+    setGeofenceBusy(true);
+    triggerHaptic("light");
+    try {
+      const saved = await saveGeofenceSettings(geofence);
+      setGeofence(saved);
+      triggerHaptic("success");
+      setSaveMessage(
+        "Pengaturan Geofencing berhasil disimpan dan disinkronkan.",
+      );
+      setTimeout(() => setSaveMessage(""), 3000);
+    } catch (error) {
+      triggerHaptic("error");
+      setSaveMessage(
+        error instanceof Error ? error.message : "Gagal menyimpan geofencing.",
+      );
+      setTimeout(() => setSaveMessage(""), 3000);
+    } finally {
+      setGeofenceBusy(false);
     }
   };
 
@@ -481,20 +558,171 @@ export default function SettingsPage() {
             </div>
           )}
 
-          <div className="rounded-2xl border border-white/5 bg-slate-950/60 p-3 text-xs text-slate-400 space-y-1">
-            <div className="flex justify-between">
-              <span>Radius Validasi:</span>
-              <span className="font-semibold text-white">
-                {geofence.radiusMeter} meter
-              </span>
+          {canManageGeofence ? (
+            <div className="space-y-3 pt-1">
+              <div className="grid grid-cols-2 gap-2">
+                <label className="space-y-1 text-xs text-slate-300">
+                  <span className="font-semibold">Latitude</span>
+                  <input
+                    type="number"
+                    step="any"
+                    min={-90}
+                    max={90}
+                    value={geofence.latitude}
+                    onChange={(e) =>
+                      setGeofence((c) => ({
+                        ...c,
+                        latitude: Number(e.target.value),
+                      }))
+                    }
+                    className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 font-mono text-xs text-white outline-none focus:border-sky-400"
+                  />
+                </label>
+                <label className="space-y-1 text-xs text-slate-300">
+                  <span className="font-semibold">Longitude</span>
+                  <input
+                    type="number"
+                    step="any"
+                    min={-180}
+                    max={180}
+                    value={geofence.longitude}
+                    onChange={(e) =>
+                      setGeofence((c) => ({
+                        ...c,
+                        longitude: Number(e.target.value),
+                      }))
+                    }
+                    className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 font-mono text-xs text-white outline-none focus:border-sky-400"
+                  />
+                </label>
+              </div>
+
+              <div className="space-y-1.5 text-xs text-slate-300">
+                <div className="flex justify-between items-center">
+                  <span className="font-semibold">Radius Kantor (meter)</span>
+                  <span className="font-mono font-bold text-sky-400">
+                    {geofence.radiusMeter}m
+                  </span>
+                </div>
+                <input
+                  type="number"
+                  min={10}
+                  max={10000}
+                  value={geofence.radiusMeter}
+                  onChange={(e) =>
+                    setGeofence((c) => ({
+                      ...c,
+                      radiusMeter: Number(e.target.value),
+                    }))
+                  }
+                  className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 font-mono text-xs text-white outline-none focus:border-sky-400"
+                />
+                <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                  {[25, 50, 100, 250, 500].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => {
+                        triggerHaptic("light");
+                        setGeofence((c) => ({ ...c, radiusMeter: preset }));
+                      }}
+                      className={`rounded-lg px-2.5 py-1 text-[11px] font-bold transition-all ${
+                        geofence.radiusMeter === preset
+                          ? "bg-sky-400 text-slate-950 shadow-sm"
+                          : "border border-white/10 bg-white/[0.04] text-slate-300 hover:bg-white/[0.08]"
+                      }`}
+                    >
+                      {preset}m
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {currentDeviceCoords ? (
+                <div className="rounded-2xl border border-white/10 bg-slate-950/80 p-3 text-xs space-y-1">
+                  <div className="flex justify-between text-slate-400">
+                    <span>GPS HP Anda:</span>
+                    <span className="font-mono text-sky-300">
+                      {currentDeviceCoords.lat.toFixed(5)},{" "}
+                      {currentDeviceCoords.lng.toFixed(5)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Jarak ke Titik Kantor:</span>
+                    <span className="font-mono font-bold text-white">
+                      {calculateDistanceMeters(
+                        currentDeviceCoords.lat,
+                        currentDeviceCoords.lng,
+                        geofence.latitude,
+                        geofence.longitude,
+                      )}{" "}
+                      meter
+                    </span>
+                  </div>
+                  <div className="pt-1 flex justify-end">
+                    <span
+                      className={`inline-block rounded-md px-2 py-0.5 text-[10px] font-bold ${
+                        calculateDistanceMeters(
+                          currentDeviceCoords.lat,
+                          currentDeviceCoords.lng,
+                          geofence.latitude,
+                          geofence.longitude,
+                        ) <= geofence.radiusMeter
+                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                          : "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                      }`}
+                    >
+                      {calculateDistanceMeters(
+                        currentDeviceCoords.lat,
+                        currentDeviceCoords.lng,
+                        geofence.latitude,
+                        geofence.longitude,
+                      ) <= geofence.radiusMeter
+                        ? "Di Dalam Radius Kantor"
+                        : "Di Luar Radius Kantor"}
+                    </span>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="flex flex-col gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={geofenceBusy}
+                  onClick={handleUseCurrentLocation}
+                  className="w-full rounded-xl border border-white/10 bg-white/[0.05] py-2.5 text-xs font-bold text-slate-200 hover:bg-white/10 active:scale-95 transition disabled:opacity-50"
+                >
+                  Ambil Lokasi GPS HP Ini
+                </button>
+                <button
+                  type="button"
+                  disabled={geofenceBusy}
+                  onClick={handleSaveGeofence}
+                  className="w-full rounded-xl bg-sky-400 py-2.5 text-xs font-black text-slate-950 shadow-md hover:bg-sky-300 active:scale-95 transition disabled:opacity-50"
+                >
+                  {geofenceBusy
+                    ? "Menyimpan..."
+                    : "Simpan Pengaturan Geofencing"}
+                </button>
+              </div>
             </div>
-            <div className="flex justify-between">
-              <span>Koordinat Kantor:</span>
-              <span className="font-mono text-slate-300">
-                {geofence.latitude.toFixed(5)}, {geofence.longitude.toFixed(5)}
-              </span>
+          ) : (
+            <div className="rounded-2xl border border-white/5 bg-slate-950/60 p-3 text-xs text-slate-400 space-y-1">
+              <div className="flex justify-between">
+                <span>Radius Validasi:</span>
+                <span className="font-semibold text-white">
+                  {geofence.radiusMeter} meter
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Koordinat Kantor:</span>
+                <span className="font-mono text-slate-300">
+                  {geofence.latitude.toFixed(5)},{" "}
+                  {geofence.longitude.toFixed(5)}
+                </span>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         {/* Hardware & App Information */}

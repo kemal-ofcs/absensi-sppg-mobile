@@ -70,6 +70,7 @@ pub fn run() {
             mobile::commands::desktop_get_sync_conflicts,
             mobile::commands::desktop_retry_failed_sync,
             mobile::commands::desktop_resolve_sync_conflicts,
+            mobile::commands::desktop_resolve_sync_conflicts_local,
             mobile::commands::desktop_clear_failed_sync,
             mobile::commands::desktop_save_file,
             mobile::commands::desktop_share_file,
@@ -88,6 +89,8 @@ pub fn run() {
             mobile::commands::desktop_clear_turso_config,
             mobile::commands::desktop_get_company_profile,
             mobile::commands::desktop_update_company_profile,
+            mobile::payroll::mobile_get_my_payroll_slips,
+            mobile::payroll::mobile_get_payroll_slip_detail,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

@@ -44,6 +44,8 @@ const MOBILE_COMMANDS: &[&str] = &[
     "desktop_update_id_card",
     "desktop_get_id_card_template",
     "desktop_save_id_card_template",
+    "desktop_force_resync_settings",
+    "desktop_debug_template_sync",
     "desktop_get_geofence_settings",
     "desktop_update_geofence_settings",
     "desktop_get_scanner_settings",
@@ -53,6 +55,7 @@ const MOBILE_COMMANDS: &[&str] = &[
     "desktop_get_sync_conflicts",
     "desktop_retry_failed_sync",
     "desktop_resolve_sync_conflicts",
+    "desktop_resolve_sync_conflicts_local",
     "desktop_clear_failed_sync",
     "desktop_save_file",
     "desktop_share_file",
@@ -71,6 +74,8 @@ const MOBILE_COMMANDS: &[&str] = &[
     "desktop_clear_turso_config",
     "desktop_get_company_profile",
     "desktop_update_company_profile",
+    "mobile_get_my_payroll_slips",
+    "mobile_get_payroll_slip_detail",
 ];
 
 fn local_build_values() -> HashMap<String, String> {

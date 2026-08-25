@@ -873,6 +873,14 @@ pub async fn desktop_update_geofence_settings(
     }
     let data = settings.get("data").cloned().unwrap_or(settings);
     operational::save_geofence_settings(&state, &data)?;
+    let token = state
+        .session
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|sess| sess.token.clone()));
+    if let Some(token) = token {
+        let _ = sync::push_outbox(&state, &token).await;
+    }
     Ok(data)
 }
 
@@ -902,6 +910,14 @@ pub async fn desktop_update_scanner_settings(
     }
     let data = settings.get("data").cloned().unwrap_or(settings);
     operational::save_scanner_settings(&state, &data)?;
+    let token = state
+        .session
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|sess| sess.token.clone()));
+    if let Some(token) = token {
+        let _ = sync::push_outbox(&state, &token).await;
+    }
     Ok(data)
 }
 
@@ -961,7 +977,7 @@ pub async fn desktop_sync_now(
             .ok_or_else(|| {
                 CommandError::new(
                     "DESKTOP_ONLINE_REQUIRED",
-                    "Login online diperlukan sebelum data operasional dapat disinkronkan.",
+                    "Login online diperlukan untuk sinkronisasi.",
                 )
             })?
     };
@@ -989,13 +1005,23 @@ pub async fn desktop_retry_failed_sync(
 }
 
 #[tauri::command]
-pub fn desktop_resolve_sync_conflicts(
+pub async fn desktop_resolve_sync_conflicts(
     state: State<'_, MobileState>,
     event_id: Option<String>,
 ) -> Result<MobileSyncStatus, CommandError> {
     require_permission(&state, "sync.retry")?;
     sync::resolve_conflicts(&state, event_id.as_deref())?;
-    desktop_get_sync_status(state)
+    desktop_sync_now(state).await
+}
+
+#[tauri::command]
+pub async fn desktop_resolve_sync_conflicts_local(
+    state: State<'_, MobileState>,
+    event_id: Option<String>,
+) -> Result<MobileSyncStatus, CommandError> {
+    require_permission(&state, "sync.retry")?;
+    sync::resolve_conflicts_local(&state, event_id.as_deref())?;
+    desktop_sync_now(state).await
 }
 
 #[tauri::command]
@@ -1062,12 +1088,21 @@ pub fn desktop_get_alfa_settings(state: State<'_, MobileState>) -> Result<Value,
 }
 
 #[tauri::command]
-pub fn desktop_save_alfa_settings(
+pub async fn desktop_save_alfa_settings(
     state: State<'_, MobileState>,
     enabled: bool,
 ) -> Result<Value, CommandError> {
     require_permission(&state, "settings.manage")?;
-    operational::save_alfa_settings(&state, enabled)
+    let res = operational::save_alfa_settings(&state, enabled)?;
+    let token = state
+        .session
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|sess| sess.token.clone()));
+    if let Some(token) = token {
+        let _ = sync::push_outbox(&state, &token).await;
+    }
+    Ok(res)
 }
 
 #[tauri::command]

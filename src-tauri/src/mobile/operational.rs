@@ -1007,6 +1007,18 @@ pub fn save_geofence_settings(state: &MobileState, settings: &Value) -> Result<(
                 params![key, value],
             )
             .map_err(|_| CommandError::internal())?;
+
+        // Bersihkan konflik & antrean outbox stale untuk key ini
+        let _ = transaction.execute(
+            "DELETE FROM desktop_sync_conflict WHERE domain = 'setting' AND entity_key = ?;",
+            params![key],
+        );
+        let _ = transaction.execute(
+            "DELETE FROM desktop_sync_outbox WHERE domain = 'setting' AND entity_key = ? AND status IN ('pending', 'failed', 'conflict');",
+            params![key],
+        );
+
+        // Enqueue secara otoritatif (base_revision: None) agar langsung disinkronkan ke cloud
         sync::enqueue(
             &transaction,
             &client_id,
@@ -1014,7 +1026,7 @@ pub fn save_geofence_settings(state: &MobileState, settings: &Value) -> Result<(
             "update",
             key,
             &json!({ "key": key, "value": value }),
-            base_revision(&transaction, "setting", key),
+            None,
         )?;
     }
     transaction.commit().map_err(|_| CommandError::internal())
@@ -1077,6 +1089,18 @@ pub fn save_scanner_settings(state: &MobileState, settings: &Value) -> Result<()
                 params![key, value],
             )
             .map_err(|_| CommandError::internal())?;
+
+        // Bersihkan konflik & antrean outbox stale untuk key ini
+        let _ = transaction.execute(
+            "DELETE FROM desktop_sync_conflict WHERE domain = 'setting' AND entity_key = ?;",
+            params![key],
+        );
+        let _ = transaction.execute(
+            "DELETE FROM desktop_sync_outbox WHERE domain = 'setting' AND entity_key = ? AND status IN ('pending', 'failed', 'conflict');",
+            params![key],
+        );
+
+        // Enqueue secara otoritatif (base_revision: None) agar langsung disinkronkan ke cloud
         sync::enqueue(
             &transaction,
             &client_id,
@@ -1084,7 +1108,7 @@ pub fn save_scanner_settings(state: &MobileState, settings: &Value) -> Result<()
             "update",
             key,
             &json!({ "key": key, "value": value }),
-            base_revision(&transaction, "setting", key),
+            None,
         )?;
     }
     transaction.commit().map_err(|_| CommandError::internal())
@@ -1468,19 +1492,28 @@ pub fn save_alfa_settings(state: &MobileState, enabled: bool) -> Result<Value, C
         )
         .map_err(|_| CommandError::internal())?;
 
+    // Bersihkan konflik & antrean outbox stale untuk auto_alfa_aktif
+    let _ = transaction.execute(
+        "DELETE FROM desktop_sync_conflict WHERE domain = 'setting' AND entity_key = 'auto_alfa_aktif';",
+        [],
+    );
+    let _ = transaction.execute(
+        "DELETE FROM desktop_sync_outbox WHERE domain = 'setting' AND entity_key = 'auto_alfa_aktif' AND status IN ('pending', 'failed', 'conflict');",
+        [],
+    );
+
     let sync_payload = json!({
         "key": "auto_alfa_aktif",
         "value": str_val,
     });
-    let revision = base_revision(&transaction, "setting", "auto_alfa_aktif");
     sync::enqueue(
         &transaction,
         &client_id,
         "setting",
-        "upsert",
+        "update",
         "auto_alfa_aktif",
         &sync_payload,
-        revision,
+        None,
     )?;
 
     transaction.commit().map_err(|_| CommandError::internal())?;
