@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
@@ -60,8 +60,8 @@ const IDR = new Intl.NumberFormat("id-ID", {
 export default function SlipDetailClient() {
   const isHydrated = useHydrated();
   const router = useRouter();
-  const params = useParams();
-  const slipId = String(params?.id || "");
+  const searchParams = useSearchParams();
+  const slipId = searchParams.get("id") || "";
   const { isAuthenticated, isLoading: authLoading } = useAuth();
 
   const [slip, setSlip] = useState<MobileSlipDetail | null>(null);

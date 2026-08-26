@@ -171,7 +171,7 @@ export default function MobilePayrollPortalPage() {
             slips.map((slip) => (
               <Link
                 key={slip.id}
-                href={`/payroll/slip/${slip.id}`}
+                href={`/payroll/slip/detail?id=${encodeURIComponent(slip.id)}`}
                 onClick={() => triggerHaptic()}
                 className="block p-4 bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-2xl transition space-y-3 active:scale-[0.99]"
               >
