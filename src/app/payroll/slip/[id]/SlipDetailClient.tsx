@@ -173,7 +173,7 @@ Status: LUNAS / DIBAYAR`;
             type="button"
             onClick={handleShare}
             disabled={sharing || !slip}
-            className="px-3 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow"
+            className="px-3 py-2 bg-sky-600 hover:bg-sky-500 text-on-accent rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow"
           >
             <Icon name="share" className="w-4 h-4" />
             <span>{sharing ? "Membagikan..." : "Bagikan"}</span>

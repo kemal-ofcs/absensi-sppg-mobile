@@ -103,7 +103,7 @@ export default function DashboardPage() {
         <Link
           href="/scanner"
           onClick={() => triggerHaptic("success")}
-          className="group relative flex items-center justify-between overflow-hidden rounded-3xl border border-sky-400/40 bg-gradient-to-r from-sky-500 via-sky-600 to-blue-700 p-5 shadow-xl shadow-sky-950/60 active:scale-[0.98] transition-all"
+          className="theme-invariant group relative flex items-center justify-between overflow-hidden rounded-3xl border border-sky-400/40 bg-gradient-to-r from-sky-500 via-sky-600 to-blue-700 p-5 shadow-xl shadow-sky-950/60 active:scale-[0.98] transition-all"
         >
           <div className="flex items-center gap-3.5">
             <div className="grid size-12 place-items-center rounded-2xl bg-white/20 text-white shadow-md">

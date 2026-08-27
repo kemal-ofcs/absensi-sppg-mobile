@@ -346,7 +346,7 @@ export function ScannerView() {
     <div className="flex flex-col gap-4">
       {/* Top Camera Viewport Card */}
       <div className="relative overflow-hidden rounded-3xl border border-white/15 bg-slate-900 shadow-2xl">
-        <div className="relative aspect-[4/3] w-full bg-black flex items-center justify-center overflow-hidden">
+        <div className="theme-invariant relative aspect-[4/3] w-full bg-black flex items-center justify-center overflow-hidden">
           <video
             ref={videoRef}
             autoPlay

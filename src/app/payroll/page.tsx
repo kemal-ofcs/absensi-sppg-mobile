@@ -17,7 +17,6 @@ import {
   type MobileSlipDetail,
   type MobileSlipSummary,
 } from "@/lib/gateways/payroll";
-import { syncNow } from "@/lib/gateways/sync-status";
 import { useHydrated } from "@/lib/hooks/useHydrated";
 
 interface ComponentItem {
@@ -203,21 +202,9 @@ export default function MobilePayrollPortalPage() {
     return () => window.removeEventListener("sppg:sync-completed", handleSync);
   }, [selectedKaryawanId, activeTab, loadEstimate, loadSlips]);
 
-  const [isSyncing, setIsSyncing] = useState(false);
-
-  const handleManualReload = async () => {
-    triggerHaptic();
-    setIsSyncing(true);
-    try {
-      await syncNow();
-    } catch {
-      // Ignore
-    } finally {
-      if (activeTab === "estimate") await loadEstimate();
-      else await loadSlips();
-      setIsSyncing(false);
-    }
-  };
+  // Muat ulang manual kini lewat gestur tarik-ke-bawah di MobileAppShell:
+  // ia menjalankan syncNow() lalu memancarkan "sppg:sync-completed", yang sudah
+  // ditangani effect di atas untuk memuat ulang estimasi/arsip slip.
 
   const handleShareSlip = async (detail: MobileSlipDetail) => {
     triggerHaptic();
@@ -286,7 +273,7 @@ Status: Estimasi Real-Time SPPG`;
   return (
     <MobileAppShell>
       <div className="p-4 space-y-4 max-w-lg mx-auto pb-20">
-        {/* Header Title & Refresh */}
+        {/* Header Title */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <Link
@@ -306,22 +293,6 @@ Status: Estimasi Real-Time SPPG`;
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => void handleManualReload()}
-            disabled={isSyncing || estimateLoading || archiveLoading}
-            className="p-2 bg-slate-800 hover:bg-slate-700 active:scale-95 text-sky-400 rounded-xl border border-slate-700 disabled:opacity-50"
-            aria-label="Muat Ulang"
-          >
-            <Icon
-              name="refresh"
-              className={`w-4 h-4 ${
-                isSyncing || estimateLoading || archiveLoading
-                  ? "animate-spin"
-                  : ""
-              }`}
-            />
-          </button>
         </div>
 
         {feedback && (

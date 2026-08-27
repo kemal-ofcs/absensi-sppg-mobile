@@ -17,6 +17,7 @@ export type IconName =
   | "id-card"
   | "logout"
   | "lock"
+  | "moon"
   | "palette"
   | "phone"
   | "plus"
@@ -25,6 +26,7 @@ export type IconName =
   | "scanner"
   | "settings"
   | "share"
+  | "sun"
   | "sync"
   | "tools"
   | "trash"
@@ -130,6 +132,7 @@ const paths: Record<IconName, ReactNode> = {
       <path d="M8 10V7a4 4 0 0 1 8 0v3" />
     </>
   ),
+  moon: <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />,
   palette: (
     <>
       <circle cx="13.5" cy="6.5" r="1" />
@@ -170,6 +173,12 @@ const paths: Record<IconName, ReactNode> = {
       <circle cx="18" cy="19" r="3" />
       <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
       <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+    </>
+  ),
+  sun: (
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
     </>
   ),
   sync: (

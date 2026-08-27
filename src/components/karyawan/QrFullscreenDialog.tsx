@@ -97,7 +97,7 @@ export function QrFullscreenDialog({
       role="dialog"
       aria-modal="true"
       aria-label={`QR Code absensi: ${employeeName}`}
-      className="fixed inset-0 z-[100] flex flex-col justify-between bg-white text-slate-900"
+      className="theme-invariant fixed inset-0 z-[100] flex flex-col justify-between bg-white text-slate-900"
     >
       {/* Header: Tombol Tutup */}
       <div className="flex items-center justify-between p-4 border-b border-slate-100">

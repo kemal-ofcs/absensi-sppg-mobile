@@ -50,7 +50,8 @@ export default function ScannerPage() {
   }
 
   return (
-    <MobileAppShell>
+    // Pull-to-refresh dimatikan: gestur geser bentrok dengan pratinjau kamera.
+    <MobileAppShell disablePullRefresh>
       <div className="flex flex-col gap-2">
         <ScannerView />
       </div>

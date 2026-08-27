@@ -47,7 +47,7 @@ export function MobileBottomNav() {
   return (
     <nav
       aria-label="Navigasi Bawah Mobile"
-      className="fixed inset-x-0 bottom-0 z-50 border-t border-white/10 bg-slate-950/95 pb-[calc(0.5rem+env(safe-area-inset-bottom))] pt-2 backdrop-blur-2xl shadow-[0_-10px_30px_rgba(0,0,0,0.6)]"
+      className="fixed inset-x-0 bottom-0 z-50 border-t border-white/10 bg-slate-950/95 pb-[calc(0.5rem+env(safe-area-inset-bottom))] pt-2 backdrop-blur-2xl nav-elevation"
     >
       <div className="mx-auto flex w-full max-w-lg items-center justify-around px-2">
         {navItems.map((item) => {
@@ -69,7 +69,7 @@ export function MobileBottomNav() {
                   className={`grid size-14 place-items-center rounded-2xl shadow-xl transition-all active:scale-90 ${
                     isActive
                       ? "bg-gradient-to-tr from-sky-400 via-sky-500 to-blue-600 text-slate-950 shadow-sky-500/40 ring-4 ring-slate-950 ring-offset-2 ring-offset-sky-500/30"
-                      : "bg-gradient-to-tr from-sky-500 to-blue-700 text-white shadow-sky-950/60 ring-4 ring-slate-950 hover:brightness-110"
+                      : "bg-gradient-to-tr from-sky-500 to-blue-700 text-on-accent shadow-sky-950/60 ring-4 ring-slate-950 hover:brightness-110"
                   }`}
                 >
                   <Icon name="scanner" className="size-7 stroke-[2.2]" />

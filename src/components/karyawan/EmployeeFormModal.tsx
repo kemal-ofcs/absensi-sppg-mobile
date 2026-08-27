@@ -83,7 +83,13 @@ export function EmployeeFormModal({
       isSubmittingRef.current = false;
 
       if (mode === "edit" && initialData) {
-        setFormData({ ...DEFAULT_FORM, ...initialData });
+        const merged = { ...DEFAULT_FORM, ...initialData };
+        // Baris lama bisa punya tanggal_daftar null/kosong; jatuhkan ke hari ini
+        // supaya input date tidak tampil kosong dan tetap bisa dikoreksi manual.
+        if (!merged.tanggal_daftar) {
+          merged.tanggal_daftar = new Date().toLocaleDateString("en-CA");
+        }
+        setFormData(merged);
       } else {
         // Mode 'add': auto-generate identifiers baru
         const todayStr = new Date().toLocaleDateString("en-CA");
@@ -406,7 +412,32 @@ export function EmployeeFormModal({
           </div>
         </div>
 
-        {/* 11 & 12. Tanggal Mulai & Selesai Aktif */}
+        {/* 11. Tanggal Mulai Masuk (tanggal_daftar) — default hari ini, bisa diubah manual */}
+        <div>
+          <label
+            htmlFor="employee-join-date"
+            className="mb-1 block text-slate-400 font-semibold"
+          >
+            Tanggal Mulai Masuk:
+          </label>
+          <input
+            id="employee-join-date"
+            type="date"
+            value={formData.tanggal_daftar || ""}
+            onChange={(e) =>
+              setFormData((prev) => ({
+                ...prev,
+                tanggal_daftar: e.target.value,
+              }))
+            }
+            className={inputClass()}
+          />
+          <p className="mt-1 text-[11px] text-slate-500">
+            Tanggal karyawan mulai bekerja. Default hari ini.
+          </p>
+        </div>
+
+        {/* 12 & 13. Tanggal Mulai & Selesai Aktif */}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>
             <label
@@ -450,7 +481,7 @@ export function EmployeeFormModal({
           </div>
         </div>
 
-        {/* 13. Catatan */}
+        {/* 14. Catatan */}
         <div>
           <label
             htmlFor="employee-notes"
@@ -483,7 +514,7 @@ export function EmployeeFormModal({
           <button
             type="submit"
             disabled={isSubmitting || shifts.length === 0}
-            className="px-5 py-2 bg-sky-600 text-white rounded-xl font-bold hover:bg-sky-500 shadow-md shadow-sky-950 active:scale-95 transition disabled:opacity-50"
+            className="px-5 py-2 bg-sky-600 text-on-accent rounded-xl font-bold hover:bg-sky-500 shadow-md shadow-sky-950 active:scale-95 transition disabled:opacity-50"
           >
             {isSubmitting
               ? "Menyimpan..."

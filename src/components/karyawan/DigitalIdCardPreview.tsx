@@ -64,6 +64,8 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
   const tokenAbsensi = employee.token_absensi
     ? String(employee.token_absensi)
     : "";
+  // Payload yang dipakai absensi manual (sama persis dengan isi QR Code): "ID_Unik|token".
+  const absensiPayload = employeeQrPayload(employee);
 
   // 1. Muat Template ID Card Resmi & Profil Instansi dari SQLite lokal
   const loadTemplateAndCompany = useCallback(async () => {
@@ -277,14 +279,14 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
   };
 
   const handleCopyToken = async () => {
-    if (!tokenAbsensi) return;
+    if (!absensiPayload) return;
     try {
-      await navigator.clipboard.writeText(tokenAbsensi);
+      await navigator.clipboard.writeText(absensiPayload);
       setCopied(true);
       triggerHaptic("success");
       setFeedback({
         type: "success",
-        text: "Token absensi berhasil disalin ke clipboard.",
+        text: "Kode absensi (ID|Token) berhasil disalin ke clipboard.",
       });
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -371,81 +373,145 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
   };
 
   const isPortrait = template?.orientation === "portrait";
+  const [previewMode, setPreviewMode] = useState<"card" | "qr">("card");
 
   return (
     <>
-      {/* Sisi Kartu Toggle (Depan / Belakang) */}
+      {/* Selector: Mode Tampilan (Kartu ID vs QR Absensi) & Sisi Kartu */}
       <div className="flex items-center justify-between gap-2 mb-3">
-        <span className="text-xs font-bold text-slate-400">
-          Pratinjau Kartu ID
-        </span>
-        <div className="flex rounded-xl bg-slate-800/80 p-1 border border-white/10">
+        {/* Toggle Mode Kartu vs QR */}
+        <div className="flex rounded-xl bg-slate-950/80 p-1 border border-white/10">
           <button
             type="button"
             onClick={() => {
               triggerHaptic("light");
-              setCardSide("front");
+              setPreviewMode("card");
             }}
-            className={`rounded-lg px-3 py-1 text-[11px] font-bold transition-all ${
-              cardSide === "front"
+            className={`rounded-lg px-2.5 py-1 text-[11px] font-bold transition-all ${
+              previewMode === "card"
                 ? "bg-sky-500 text-slate-950 shadow"
                 : "text-slate-400 hover:text-slate-200"
             }`}
           >
-            Sisi Depan
+            Kartu ID
           </button>
           <button
             type="button"
             onClick={() => {
               triggerHaptic("light");
-              setCardSide("back");
+              setPreviewMode("qr");
             }}
-            className={`rounded-lg px-3 py-1 text-[11px] font-bold transition-all ${
-              cardSide === "back"
+            className={`rounded-lg px-2.5 py-1 text-[11px] font-bold transition-all ${
+              previewMode === "qr"
                 ? "bg-sky-500 text-slate-950 shadow"
                 : "text-slate-400 hover:text-slate-200"
             }`}
           >
-            Sisi Belakang
+            QR Scanner
           </button>
         </div>
+
+        {/* Toggle Sisi Kartu Depan / Belakang (hanya jika mode card) */}
+        {previewMode === "card" ? (
+          <div className="flex rounded-xl bg-slate-950/80 p-1 border border-white/10">
+            <button
+              type="button"
+              onClick={() => {
+                triggerHaptic("light");
+                setCardSide("front");
+              }}
+              className={`rounded-lg px-2.5 py-1 text-[11px] font-bold transition-all ${
+                cardSide === "front"
+                  ? "bg-white/20 text-white shadow-sm"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              Depan
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                triggerHaptic("light");
+                setCardSide("back");
+              }}
+              className={`rounded-lg px-2.5 py-1 text-[11px] font-bold transition-all ${
+                cardSide === "back"
+                  ? "bg-white/20 text-white shadow-sm"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              Belakang
+            </button>
+          </div>
+        ) : null}
       </div>
 
-      {/* Render ID Card Canvas Resolusi Tinggi */}
-      <div
-        className={`relative w-full overflow-hidden rounded-3xl border border-white/15 bg-slate-950 shadow-2xl transition-all ${
-          isPortrait
-            ? "aspect-[54/85.6] max-w-[280px] mx-auto"
-            : "aspect-[85.6/54]"
-        }`}
-      >
-        {templateRendering && !renderedCardUrl ? (
-          <div className="flex size-full items-center justify-center bg-slate-900 animate-pulse">
-            <span className="text-xs text-slate-400 font-medium">
-              Me-render kartu resolusi tinggi...
-            </span>
-          </div>
-        ) : renderedCardUrl ? (
-          // biome-ignore lint/performance/noImgElement: Pratinjau ID card hasil render canvas
-          <img
-            src={renderedCardUrl}
-            alt={`ID Card ${nama} (${cardSide === "front" ? "Depan" : "Belakang"})`}
-            className="size-full object-contain rounded-3xl"
-          />
-        ) : (
-          <div className="flex size-full flex-col items-center justify-center gap-2 p-4 text-center bg-slate-900">
-            <Icon name="alert" className="size-6 text-amber-400" />
-            <span className="text-xs text-slate-400">
-              Sedang memuat pratinjau kartu...
-            </span>
-          </div>
-        )}
-      </div>
+      {/* Frame Pratinjau (Kartu ID Canvas atau QR Code Langsung) */}
+      {previewMode === "card" ? (
+        <div
+          className={`relative w-full overflow-hidden rounded-3xl border border-white/15 bg-slate-950 shadow-2xl transition-all ${
+            isPortrait
+              ? "aspect-[54/85.6] max-w-[240px] max-h-[300px] mx-auto"
+              : "aspect-[85.6/54] max-w-[340px] max-h-[215px] mx-auto"
+          }`}
+        >
+          {templateRendering && !renderedCardUrl ? (
+            <div className="flex size-full flex-col items-center justify-center gap-2 bg-slate-900 animate-pulse p-4">
+              <Icon name="id-card" className="size-8 text-sky-400/60" />
+              <span className="text-xs text-slate-400 font-medium">
+                Me-render kartu resolusi tinggi...
+              </span>
+            </div>
+          ) : renderedCardUrl ? (
+            // biome-ignore lint/performance/noImgElement: Pratinjau ID card hasil render canvas
+            <img
+              src={renderedCardUrl}
+              alt={`ID Card ${nama} (${cardSide === "front" ? "Depan" : "Belakang"})`}
+              className="size-full object-contain rounded-3xl"
+            />
+          ) : (
+            <div className="flex size-full flex-col items-center justify-center gap-2 p-4 text-center bg-slate-900">
+              <Icon name="alert" className="size-6 text-amber-400" />
+              <span className="text-xs text-slate-400">
+                Sedang memuat pratinjau kartu...
+              </span>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* Mode Quick QR Scanner */
+        <div className="relative mx-auto flex max-w-[240px] flex-col items-center justify-center rounded-3xl border border-white/15 bg-white p-4 shadow-2xl animate-in zoom-in-95 duration-150">
+          {qrStatus === "ready" && qrDataUrl ? (
+            // biome-ignore lint/performance/noImgElement: QR Code base64
+            <img
+              src={qrDataUrl}
+              alt={`QR Code Absensi ${nama}`}
+              className="size-full max-h-[190px] object-contain rounded-xl"
+            />
+          ) : qrStatus === "loading" ? (
+            <div className="flex size-44 items-center justify-center">
+              <span className="text-xs text-slate-500 font-medium">
+                Membuat QR Code...
+              </span>
+            </div>
+          ) : (
+            <div className="flex size-44 flex-col items-center justify-center gap-1 text-center p-2">
+              <Icon name="alert" className="size-6 text-amber-500" />
+              <span className="text-[11px] font-semibold text-slate-700">
+                Token Absensi Belum Dibuat
+              </span>
+            </div>
+          )}
+          <span className="mt-1 text-[10px] font-bold text-slate-800 uppercase tracking-wider">
+            QR Absensi SPPG
+          </span>
+        </div>
+      )}
 
       {/* Banner Notifikasi Feedback Operasional */}
       {feedback ? (
         <div
-          className={`mt-2 flex items-center gap-2 rounded-xl p-2.5 text-xs font-semibold animate-fadeIn ${
+          className={`mt-2.5 flex items-center gap-2 rounded-xl p-2.5 text-xs font-semibold animate-in fade-in duration-150 ${
             feedback.type === "success"
               ? "bg-emerald-500/15 border border-emerald-500/30 text-emerald-300"
               : "bg-rose-500/15 border border-rose-500/30 text-rose-300"
@@ -466,10 +532,12 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
           type="button"
           disabled={sharingCard || templateRendering}
           onClick={() => void handleShareCard()}
-          className="flex items-center justify-center gap-2 rounded-xl bg-sky-500 px-3 py-2.5 text-xs font-bold text-slate-950 hover:bg-sky-400 active:scale-95 transition disabled:opacity-40"
+          className="flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 px-3 py-2.5 text-xs font-bold text-slate-950 hover:brightness-110 active:scale-95 transition disabled:opacity-40 shadow-sm"
         >
           <Icon name="share" className="size-4" />
-          {sharingCard ? "Membagikan..." : "Bagikan ID Card"}
+          <span className="truncate">
+            {sharingCard ? "Membagikan..." : "Bagikan Kartu"}
+          </span>
         </button>
 
         {/* Unduh Gambar Kartu */}
@@ -477,15 +545,17 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
           type="button"
           disabled={downloadingCard || templateRendering}
           onClick={() => void handleDownloadCard()}
-          className="flex items-center justify-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/20 active:scale-95 transition disabled:opacity-40"
+          className="flex items-center justify-center gap-1.5 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/20 active:scale-95 transition disabled:opacity-40 shadow-sm"
         >
           <Icon
             name={downloadingCard ? "check" : "download"}
             className="size-4"
           />
-          {downloadingCard
-            ? "Tersimpan!"
-            : `Unduh ${cardSide === "front" ? "Depan" : "Belakang"}`}
+          <span className="truncate">
+            {downloadingCard
+              ? "Tersimpan!"
+              : `Unduh ${cardSide === "front" ? "Depan" : "Belakang"}`}
+          </span>
         </button>
 
         {/* Perbesar QR */}
@@ -497,37 +567,48 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
             triggerHaptic("light");
             setQrFullscreen(true);
           }}
-          className="flex items-center justify-center gap-2 rounded-xl border border-sky-500/40 bg-sky-500/10 px-3 py-2.5 text-xs font-bold text-sky-300 hover:bg-sky-500/20 active:scale-95 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          className="flex items-center justify-center gap-1.5 rounded-xl border border-sky-500/40 bg-sky-500/10 px-3 py-2.5 text-xs font-bold text-sky-300 hover:bg-sky-500/20 active:scale-95 transition disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
         >
-          <Icon name="id-card" className="size-4" />
-          Perbesar QR
+          <Icon name="scanner" className="size-4" />
+          <span className="truncate">Layar Penuh QR</span>
         </button>
 
         {/* Salin Token */}
         <button
           type="button"
-          disabled={!tokenAbsensi}
+          disabled={!absensiPayload}
           onClick={() => void handleCopyToken()}
-          className="flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2.5 text-xs font-bold text-slate-300 hover:bg-white/10 active:scale-95 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          className="flex items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2.5 text-xs font-bold text-slate-300 hover:bg-white/10 active:scale-95 transition disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
         >
-          <Icon name={copied ? "check" : "upload"} className="size-4" />
-          {copied ? "Tersalin!" : "Salin Token"}
+          <Icon name={copied ? "check" : "document"} className="size-4" />
+          <span className="truncate">
+            {copied ? "Tersalin!" : "Salin ID|Token"}
+          </span>
         </button>
       </div>
 
       {/* Informasi Token Tersembunyi */}
       {tokenAbsensi ? (
-        <div className="mt-3 rounded-xl border border-white/10 bg-slate-900/60 p-3">
-          <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
-            Token Absensi
-          </p>
-          <p className="text-xs font-mono text-slate-300 break-all">
-            {tokenAbsensi}
+        <div className="mt-3 rounded-2xl border border-white/10 bg-slate-950/60 p-3 shadow-inner">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+              Kode Absensi Manual (ID|Token)
+            </span>
+            <button
+              type="button"
+              onClick={() => void handleCopyToken()}
+              className="text-[10px] font-bold text-sky-400 hover:text-sky-300 transition active:scale-95"
+            >
+              {copied ? "Tersalin!" : "Salin"}
+            </button>
+          </div>
+          <p className="text-xs font-mono text-slate-200 break-all select-all">
+            {absensiPayload || tokenAbsensi}
           </p>
         </div>
       ) : (
-        <div className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
-          <p className="text-xs text-amber-400 leading-relaxed">
+        <div className="mt-3 rounded-2xl border border-amber-500/20 bg-amber-500/5 p-3">
+          <p className="text-xs text-amber-300 leading-relaxed">
             Token absensi belum dibuat. Gunakan fitur Generate Token di aplikasi
             Desktop untuk mengaktifkan QR Code karyawan ini.
           </p>

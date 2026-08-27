@@ -1,33 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { BrandLogo } from "@/components/ui/BrandLogo";
-import { Icon } from "@/components/ui/Icon";
-import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
 import { useOnlineStatus } from "@/lib/hooks/useOnlineStatus";
-import { invokeDesktop } from "@/lib/runtime/desktop-commands";
 
 export function MobileHeader() {
   const { user } = useAuth();
   const isOnline = useOnlineStatus();
-  const [isSyncing, setIsSyncing] = useState(false);
-
-  const handleQuickSync = async () => {
-    if (isSyncing) return;
-    setIsSyncing(true);
-    triggerHaptic("light");
-    try {
-      await invokeDesktop("desktop_sync_now");
-      triggerHaptic("success");
-    } catch {
-      triggerHaptic("warning");
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
   if (!user) return null;
 
   return (
@@ -56,20 +37,10 @@ export function MobileHeader() {
           </div>
         </Link>
 
-        {/* Right: Operator pill & Sync icon button */}
+        {/* Right: Tema & pill operator. Sinkronisasi manual kini lewat
+            gestur tarik-ke-bawah (lihat components/PullToRefresh.tsx). */}
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleQuickSync}
-            disabled={isSyncing}
-            aria-label="Sinkronisasi data"
-            className="grid size-10 place-items-center rounded-xl border border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/10 active:scale-95 transition"
-          >
-            <Icon
-              name="sync"
-              className={`size-4 ${isSyncing ? "animate-spin text-sky-400" : ""}`}
-            />
-          </button>
+          <ThemeToggle />
           <Link
             href="/settings"
             className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.05] px-2.5 py-1.5 active:scale-95 transition"

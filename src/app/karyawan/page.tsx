@@ -261,7 +261,7 @@ export default function KaryawanPage() {
             id="btn-tambah-karyawan"
             onClick={handleAddNew}
             aria-label="Tambah karyawan baru"
-            className="grid size-10 place-items-center rounded-2xl bg-gradient-to-tr from-sky-500 to-blue-600 text-white shadow-lg shadow-sky-500/30 hover:brightness-110 active:scale-90 transition-all"
+            className="grid size-10 place-items-center rounded-2xl bg-gradient-to-tr from-sky-500 to-blue-600 text-on-accent shadow-lg shadow-sky-500/30 hover:brightness-110 active:scale-90 transition-all"
           >
             <svg
               aria-hidden="true"

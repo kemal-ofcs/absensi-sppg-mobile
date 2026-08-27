@@ -1011,7 +1011,7 @@ export default function MobileShiftPage() {
                 type="button"
                 disabled={isDeleting}
                 onClick={() => void handleDeleteShift()}
-                className="flex-1 rounded-xl bg-rose-500 py-2.5 text-xs font-black text-white shadow-lg hover:bg-rose-600 active:scale-95 transition disabled:opacity-50"
+                className="flex-1 rounded-xl bg-rose-500 py-2.5 text-xs font-black text-on-accent shadow-lg hover:bg-rose-600 active:scale-95 transition disabled:opacity-50"
               >
                 {isDeleting ? "Menghapus..." : "Hapus Shift"}
               </button>

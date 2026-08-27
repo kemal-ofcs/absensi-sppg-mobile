@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
+import { ThemeSettingsCard } from "@/components/ThemeSettingsCard";
 import { Icon } from "@/components/ui/Icon";
 import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import {
@@ -364,6 +365,9 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        {/* Pilihan Tema Gelap/Terang */}
+        <ThemeSettingsCard />
+
         {/* Global Toast Message */}
         {saveMessage && (
           <div className="rounded-2xl border border-sky-500/30 bg-sky-950/60 p-3 text-xs font-bold text-sky-200 shadow-lg">
@@ -391,7 +395,7 @@ export default function SettingsPage() {
               <Link
                 href="/operational"
                 onClick={() => triggerHaptic("light")}
-                className="rounded-xl bg-indigo-500 px-3.5 py-1.5 text-xs font-black text-white shadow-md hover:bg-indigo-400 active:scale-95 transition"
+                className="rounded-xl bg-indigo-500 px-3.5 py-1.5 text-xs font-black text-on-accent shadow-md hover:bg-indigo-400 active:scale-95 transition"
               >
                 Buka &rarr;
               </Link>
@@ -687,7 +691,7 @@ export default function SettingsPage() {
                 }`}
               >
                 <span
-                  className={`pointer-events-none inline-block size-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                  className={`pointer-events-none inline-block size-5 transform rounded-full bg-on-accent shadow-lg ring-0 transition duration-200 ease-in-out ${
                     geofence.enabled ? "translate-x-5" : "translate-x-0"
                   }`}
                 />
