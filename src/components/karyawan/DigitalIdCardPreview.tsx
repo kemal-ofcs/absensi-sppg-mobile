@@ -89,14 +89,19 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    // Muat dari SQLite lokal dahulu agar preview tampil instan (0ms).
     void loadTemplateAndCompany();
-    // Memicu sinkronisasi latar belakang agar template terbaru dari cloud langsung tertarik
-    void syncNow().catch(() => undefined);
-    // Retry load sekali lagi setelah 1.5 detik jika sinkronisasi baru saja menyelesaikan snapshot
-    const timer = setTimeout(() => {
-      void loadTemplateAndCompany();
-    }, 1500);
-    return () => clearTimeout(timer);
+    // Picu sinkronisasi latar belakang, lalu muat ulang begitu snapshot terbaru
+    // benar-benar diterapkan ke database lokal (bukan menebak jeda waktu tetap).
+    void syncNow()
+      .then(() => {
+        if (!cancelled) void loadTemplateAndCompany();
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, [loadTemplateAndCompany]);
 
   // Reaktif terhadap event sync selesai (latar belakang Turso Cloud)

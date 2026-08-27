@@ -32,7 +32,10 @@ describe("Schema Consistency & Zero-Drift Guard", () => {
         'app_permission', 'role_permission', 'app_session',
         'auth_login_rate_limit', 'sync_operation_receipt',
         'sync_change_log', 'sync_changelog', 'app_bootstrap_state',
-        'import_offline', 'tbl_hari_libur'
+        'import_offline', 'tbl_hari_libur',
+        'company_profile', 'id_card_template',
+        'salary_configs', 'overtime_tier_rules', 'payroll_components',
+        'tax_rules', 'bpjs_rules', 'payroll_runs', 'payroll_items', 'payroll_audit_logs'
       );
     `);
     const tableCount = Number(tablesRes.rows[0]?.count ?? 0);
@@ -60,6 +63,8 @@ describe("Schema Consistency & Zero-Drift Guard", () => {
     expect(snapshot).toHaveProperty("shifts");
     expect(snapshot).toHaveProperty("holidays");
     expect(snapshot).toHaveProperty("settings");
+    expect(snapshot).toHaveProperty("companyProfiles");
+    expect(snapshot).toHaveProperty("idCardTemplates");
     expect(snapshot).toHaveProperty("backups");
     expect(snapshot).toHaveProperty("corrections");
     expect(snapshot).toHaveProperty("imports");

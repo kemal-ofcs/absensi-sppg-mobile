@@ -1,4 +1,8 @@
-use std::{collections::HashSet, time::SystemTime};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::atomic::{AtomicBool, Ordering},
+    time::SystemTime,
+};
 
 use rusqlite::{params, types::Value as SqlValue, OptionalExtension, Transaction};
 use serde_json::{json, Value};
@@ -7,8 +11,61 @@ use sha2::{Digest, Sha256};
 use super::{
     config::MobileState,
     models::{CommandError, MobileSyncStatus},
-    remote, storage,
+    payroll_seed, remote, storage,
+    turso::TursoClient,
 };
+
+/// Versi skema yang dipahami build ini. WAJIB dinaikkan bersama
+/// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
+/// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
+/// yang sama di Turso.
+pub const CLIENT_SCHEMA_VERSION: i64 = 10;
+
+/// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
+fn is_client_schema_outdated(cloud_version: i64) -> bool {
+    cloud_version > CLIENT_SCHEMA_VERSION
+}
+
+fn schema_outdated_error(cloud_version: i64) -> CommandError {
+    CommandError::new(
+        "SCHEMA_VERSION_OUTDATED",
+        format!(
+            "Aplikasi perlu diperbarui. Skema database cloud sudah versi {cloud_version}, \
+             sedangkan aplikasi ini hanya mendukung versi {CLIENT_SCHEMA_VERSION}. \
+             Pengiriman data dihentikan agar kolom versi baru tidak tertimpa data lama."
+        ),
+    )
+}
+
+/// Menolak push dari build yang skemanya lebih tua daripada cloud.
+///
+/// Arah sebaliknya (client lebih baru daripada cloud) sengaja dibiarkan lewat:
+/// itu jalur normal, karena `TursoClient::ensure_schema` pada client barulah yang
+/// memigrasi cloud. Yang berbahaya hanya client lama menimpa baris yang skemanya
+/// sudah lebih baru, sebab kolom yang belum dikenal tidak ikut di-`SNAPSHOT_TABLES`
+/// dan akan hilang saat ditulis ulang.
+async fn assert_cloud_schema_compatible(turso: &TursoClient) -> Result<(), CommandError> {
+    let cloud_version = turso
+        .query_one(
+            "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migration;",
+            vec![],
+        )
+        .await?
+        .to_objects()
+        .into_iter()
+        .next()
+        .and_then(|row| row.get("version").cloned())
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        })
+        .unwrap_or(0);
+    if is_client_schema_outdated(cloud_version) {
+        return Err(schema_outdated_error(cloud_version));
+    }
+    Ok(())
+}
 
 struct SnapshotTable {
     payload_key: &'static str,
@@ -296,6 +353,159 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         entity_column: "id_log",
         delete_missing: false,
     },
+    SnapshotTable {
+        payload_key: "salaryConfigs",
+        domain: "payroll",
+        table: "salary_configs",
+        columns: &[
+            "id",
+            "id_karyawan",
+            "rate_per_hour",
+            "ptkp_status",
+            "effective_date",
+            "created_by",
+            "created_at",
+        ],
+        conflict_column: "id_karyawan, effective_date",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "overtimeTierRules",
+        domain: "payroll",
+        table: "overtime_tier_rules",
+        columns: &[
+            "id",
+            "rule_type",
+            "tier_order",
+            "hour_start",
+            "hour_end",
+            "multiplier",
+            "is_active",
+        ],
+        conflict_column: "rule_type, tier_order",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "payrollComponents",
+        domain: "payroll",
+        table: "payroll_components",
+        columns: &[
+            "id",
+            "name",
+            "category",
+            "calc_type",
+            "default_value",
+            "applies_to",
+            "is_active",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "taxRules",
+        domain: "payroll",
+        table: "tax_rules",
+        columns: &[
+            "id",
+            "category",
+            "bracket_min",
+            "bracket_max",
+            "rate_percentage",
+            "effective_date",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "bpjsRules",
+        domain: "payroll",
+        table: "bpjs_rules",
+        columns: &[
+            "id",
+            "component_code",
+            "component_name",
+            "rate_percentage",
+            "wage_cap",
+            "effective_date",
+        ],
+        conflict_column: "component_code",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "payrollRuns",
+        domain: "payroll",
+        table: "payroll_runs",
+        columns: &[
+            "id",
+            "idempotency_key",
+            "period_start",
+            "period_end",
+            "status",
+            "total_gross_payout",
+            "total_net_payout",
+            "total_employees",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "payrollItems",
+        domain: "payroll",
+        table: "payroll_items",
+        columns: &[
+            "id",
+            "payroll_run_id",
+            "id_karyawan",
+            "nama_karyawan",
+            "divisi",
+            "ptkp_status",
+            "total_regular_hours",
+            "total_overtime_hours",
+            "total_overtime_index",
+            "rate_per_hour",
+            "basic_salary",
+            "overtime_salary",
+            "gross_salary",
+            "total_allowances",
+            "total_deductions",
+            "bpjs_employee_total",
+            "bpjs_company_total",
+            "pph21_amount",
+            "net_salary",
+            "breakdown_snapshot",
+            "created_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
+    SnapshotTable {
+        payload_key: "payrollAuditLogs",
+        domain: "payroll",
+        table: "payroll_audit_logs",
+        columns: &[
+            "id",
+            "payroll_run_id",
+            "action",
+            "old_status",
+            "new_status",
+            "performed_by",
+            "notes",
+            "created_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+    },
 ];
 
 const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
@@ -320,6 +530,14 @@ const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
     ("log-scan", "delete"),
     ("offline-import", "delete"),
     ("offline-import", "row"),
+    ("payroll", "bpjs-rule"),
+    ("payroll", "create-run"),
+    ("payroll", "delete"),
+    ("payroll", "overtime-rule"),
+    ("payroll", "payroll-component"),
+    ("payroll", "salary-config"),
+    ("payroll", "tax-rule"),
+    ("payroll", "transition-status"),
     ("setting", "update"),
     ("setting", "upsert"),
     ("shift", "create"),
@@ -331,6 +549,29 @@ pub(super) fn is_canonical_sync_route(domain: &str, operation: &str) -> bool {
     CANONICAL_SYNC_ROUTES
         .iter()
         .any(|route| *route == (domain, operation))
+}
+
+/// Kunci `setting_gex_system` yang HANYA berlaku untuk perangkat ini.
+///
+/// Tabel setting ikut snapshot sync, jadi tanpa penjagaan ini konfigurasi
+/// koneksi satu perangkat bisa terdorong ke cloud lalu tertarik oleh semua
+/// perangkat lain — dan `MobileState::load` membaca `turso_database_url` saat
+/// startup untuk memilih database cloud, sehingga perangkat bisa diarahkan ke
+/// database yang salah.
+pub const DEVICE_LOCAL_SETTING_KEYS: &[&str] = &[
+    "turso_database_url",
+    "turso_auth_token",
+    "server_api_base_url",
+    // Provider dan izin transport adalah bagian tak terpisahkan dari alamat
+    // database perangkat ini. Kalau ikut tersinkronisasi, perangkat lain akan
+    // menarik "self_hosted" beserta URL LAN milik kantor dan mencoba
+    // menghubungi 192.168.x.x dari jaringan yang sama sekali berbeda.
+    "turso_database_provider",
+    "turso_allow_insecure_transport",
+];
+
+pub fn is_device_local_setting(key: &str) -> bool {
+    DEVICE_LOCAL_SETTING_KEYS.contains(&key)
 }
 
 fn sql_value(value: Option<&Value>) -> SqlValue {
@@ -355,103 +596,109 @@ fn entity_key(row: &Value, column: &str) -> String {
     }
 }
 
-fn has_unsynced_change(
-    transaction: &Transaction<'_>,
-    domain: &str,
-    key: &str,
-) -> Result<bool, CommandError> {
-    transaction
-        .query_row(
-            r#"
-      SELECT EXISTS(
-        SELECT 1 FROM desktop_sync_outbox
-        WHERE domain = ? AND entity_key = ?
-          AND status IN ('pending', 'failed', 'conflict')
-      );
+/// Snapshot in-memory dari seluruh entri outbox yang belum tuntas.
+///
+/// Dibangun sekali di awal `apply_snapshot`, lalu dipakai untuk memeriksa setiap
+/// baris snapshot. Versi lama menembakkan 1-4 query per baris — dua di antaranya
+/// `json_extract` tanpa indeks yang memindai seluruh outbox — sehingga biaya
+/// penerapan snapshot adalah O(baris x outbox). Sekarang O(baris + outbox).
+#[derive(Default)]
+struct PendingGuard {
+    /// Kunci gabungan `domain \u{1} entity_key`; satu alokasi per pencarian.
+    by_domain_key: HashSet<String>,
+    attendance_sessions: HashSet<String>,
+    scan_logs: HashSet<(String, String, String, String)>,
+}
+
+fn guard_key(domain: &str, key: &str) -> String {
+    format!("{domain}\u{1}{key}")
+}
+
+impl PendingGuard {
+    fn load(transaction: &Transaction<'_>) -> Result<Self, CommandError> {
+        let mut guard = Self::default();
+        let mut statement = transaction
+            .prepare(
+                r#"
+      SELECT domain, entity_key,
+             COALESCE(json_extract(payload_json, '$.attendance.id_sesi'), '') AS sesi,
+             COALESCE(json_extract(payload_json, '$.log.timestamp_scan'), '') AS log_ts,
+             COALESCE(json_extract(payload_json, '$.log.id_karyawan'), '') AS log_emp,
+             COALESCE(json_extract(payload_json, '$.log.jenis_scan'), '') AS log_kind,
+             COALESCE(json_extract(payload_json, '$.log.id_referensi'), '') AS log_ref
+      FROM desktop_sync_outbox
+      WHERE status IN ('pending', 'failed', 'conflict');
       "#,
-            params![domain, key],
-            |row| row.get(0),
-        )
-        .map_err(|_| CommandError::internal())
-}
-
-fn row_has_unsynced_change(
-    transaction: &Transaction<'_>,
-    definition: &SnapshotTable,
-    row: &Value,
-    key: &str,
-) -> Result<bool, CommandError> {
-    if has_unsynced_change(transaction, definition.domain, key)? {
-        return Ok(true);
-    }
-    if definition.domain == "shift" {
-        let code = entity_key(row, "kode_shift");
-        if !code.is_empty()
-            && (has_unsynced_change(transaction, definition.domain, &format!("kode:{code}"))?
-                || has_unsynced_change(transaction, definition.domain, &code)?)
-        {
-            return Ok(true);
-        }
-        let shift_id = entity_key(row, "id_shift");
-        if !shift_id.is_empty() && has_unsynced_change(transaction, definition.domain, &shift_id)? {
-            return Ok(true);
-        }
-    }
-    if definition.domain == "attendance" {
-        let pending_attendance: bool = transaction
-            .query_row(
-                r#"
-        SELECT EXISTS(
-          SELECT 1 FROM desktop_sync_outbox
-          WHERE status IN ('pending', 'failed', 'conflict')
-            AND COALESCE(json_extract(payload_json, '$.attendance.id_sesi'), '') = ?
-        );
-        "#,
-                [key],
-                |result| result.get(0),
             )
             .map_err(|_| CommandError::internal())?;
-        if pending_attendance {
-            return Ok(true);
-        }
-    }
-    if definition.domain == "log-scan" {
-        let timestamp = entity_key(row, "timestamp_scan");
-        let employee_id = entity_key(row, "id_karyawan");
-        let scan_type = entity_key(row, "jenis_scan");
-        let reference_id = entity_key(row, "id_referensi");
-        let pending_log: bool = transaction
-            .query_row(
-                r#"
-        SELECT EXISTS(
-          SELECT 1 FROM desktop_sync_outbox
-          WHERE status IN ('pending', 'failed', 'conflict')
-            AND COALESCE(json_extract(payload_json, '$.log.timestamp_scan'), '') = ?
-            AND COALESCE(json_extract(payload_json, '$.log.id_karyawan'), '') = ?
-            AND COALESCE(json_extract(payload_json, '$.log.jenis_scan'), '') = ?
-            AND COALESCE(json_extract(payload_json, '$.log.id_referensi'), '') = ?
-        );
-        "#,
-                params![timestamp, employee_id, scan_type, reference_id],
-                |result| result.get(0),
-            )
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2).unwrap_or_default(),
+                    row.get::<_, String>(3).unwrap_or_default(),
+                    row.get::<_, String>(4).unwrap_or_default(),
+                    row.get::<_, String>(5).unwrap_or_default(),
+                    row.get::<_, String>(6).unwrap_or_default(),
+                ))
+            })
             .map_err(|_| CommandError::internal())?;
-        if pending_log {
-            return Ok(true);
+        for row in rows {
+            let (domain, key, sesi, log_ts, log_emp, log_kind, log_ref) =
+                row.map_err(|_| CommandError::internal())?;
+            guard.by_domain_key.insert(guard_key(&domain, &key));
+            if !sesi.is_empty() {
+                guard.attendance_sessions.insert(sesi);
+            }
+            if !(log_ts.is_empty() && log_emp.is_empty()) {
+                guard.scan_logs.insert((log_ts, log_emp, log_kind, log_ref));
+            }
+        }
+        Ok(guard)
+    }
+
+    fn has(&self, domain: &str, key: &str) -> bool {
+        self.by_domain_key.contains(&guard_key(domain, key))
+    }
+
+    fn row_has_unsynced_change(&self, definition: &SnapshotTable, row: &Value, key: &str) -> bool {
+        if self.has(definition.domain, key) {
+            return true;
+        }
+        match definition.domain {
+            "shift" => {
+                let code = entity_key(row, "kode_shift");
+                if !code.is_empty()
+                    && (self.has("shift", &format!("kode:{code}")) || self.has("shift", &code))
+                {
+                    return true;
+                }
+                let shift_id = entity_key(row, "id_shift");
+                !shift_id.is_empty() && self.has("shift", &shift_id)
+            }
+            "attendance" => self.attendance_sessions.contains(key),
+            "log-scan" => self.scan_logs.contains(&(
+                entity_key(row, "timestamp_scan"),
+                entity_key(row, "id_karyawan"),
+                entity_key(row, "jenis_scan"),
+                entity_key(row, "id_referensi"),
+            )),
+            _ => false,
         }
     }
-    Ok(false)
 }
 
-fn sync_table_error(table: &str) -> CommandError {
+fn sync_table_error(table: &str, err: impl std::fmt::Display) -> CommandError {
     CommandError::new(
         "DESKTOP_SYNC_APPLY_FAILED",
-        format!("Snapshot tabel {table} tidak dapat diterapkan ke database lokal."),
+        format!("Snapshot tabel {table} tidak dapat diterapkan ke database lokal: {err}"),
     )
 }
 
 fn reconcile_shift_ids(
     transaction: &Transaction<'_>,
+    guard: &PendingGuard,
     snapshot: &Value,
 ) -> Result<(), CommandError> {
     let empty_vec = Vec::new();
@@ -466,7 +713,7 @@ fn reconcile_shift_ids(
         let Some(code) = shift.get("kode_shift").and_then(Value::as_i64) else {
             continue;
         };
-        if server_id <= 0 || has_unsynced_change(transaction, "shift", &format!("kode:{code}"))? {
+        if server_id <= 0 || guard.has("shift", &format!("kode:{code}")) {
             continue;
         }
         let local_id = transaction
@@ -476,7 +723,7 @@ fn reconcile_shift_ids(
                 |row| row.get::<_, i64>(0),
             )
             .optional()
-            .map_err(|_| sync_table_error("tbl_shift"))?;
+            .map_err(|err| sync_table_error("tbl_shift", err))?;
         let Some(local_id) = local_id.filter(|local_id| *local_id != server_id) else {
             continue;
         };
@@ -485,13 +732,13 @@ fn reconcile_shift_ids(
                 "UPDATE master_data SET id_shift = ? WHERE id_shift = ?;",
                 params![server_id, local_id],
             )
-            .map_err(|_| sync_table_error("tbl_shift"))?;
+            .map_err(|err| sync_table_error("tbl_shift", err))?;
         transaction
             .execute(
                 "UPDATE absensi_harian SET id_shift = ? WHERE id_shift = ?;",
                 params![server_id, local_id],
             )
-            .map_err(|_| sync_table_error("tbl_shift"))?;
+            .map_err(|err| sync_table_error("tbl_shift", err))?;
         let server_id_exists = transaction
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM tbl_shift WHERE id_shift = ?);",
@@ -502,38 +749,68 @@ fn reconcile_shift_ids(
         if server_id_exists {
             transaction
                 .execute("DELETE FROM tbl_shift WHERE id_shift = ?;", [local_id])
-                .map_err(|_| sync_table_error("tbl_shift"))?;
+                .map_err(|err| sync_table_error("tbl_shift", err))?;
         } else {
             transaction
                 .execute(
                     "UPDATE tbl_shift SET id_shift = ? WHERE id_shift = ?;",
                     params![server_id, local_id],
                 )
-                .map_err(|_| sync_table_error("tbl_shift"))?;
+                .map_err(|err| sync_table_error("tbl_shift", err))?;
         }
     }
     Ok(())
 }
 
+const REVISION_UPSERT_SQL: &str = r#"
+INSERT INTO desktop_entity_revision (
+  domain, entity_key, server_revision, payload_hash, updated_at
+) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(domain, entity_key) DO UPDATE SET
+  server_revision = excluded.server_revision,
+  payload_hash = excluded.payload_hash,
+  updated_at = excluded.updated_at;
+"#;
+
+/// Sidik jari satu baris snapshot. Nama tabel ikut di-hash supaya dua tabel yang
+/// berbagi `domain` (mis. `payroll_runs`, `payroll_items`, `payroll_audit_logs`)
+/// tidak pernah saling mengaku identik lewat `desktop_entity_revision` yang
+/// berkunci `(domain, entity_key)`.
+fn row_payload_hash(table: &str, row: &Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(table.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(row.to_string().as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 fn apply_table(
     transaction: &Transaction<'_>,
+    guard: &PendingGuard,
+    hashes: &mut HashMap<String, String>,
     snapshot: &Value,
     definition: &SnapshotTable,
     revision: i64,
-) -> Result<(), CommandError> {
-    let empty_vec = Vec::new();
-    let (rows, present) = match snapshot
+) -> Result<usize, CommandError> {
+    // Kunci payload yang tidak dikirim server berarti "tabel ini tidak berubah"
+    // pada pull inkremental — bukan "tabel ini kosong". Berhenti lebih awal agar
+    // blok delete_missing tidak pernah menyentuhnya.
+    let Some(rows) = snapshot
         .get(definition.payload_key)
         .and_then(Value::as_array)
-    {
-        Some(arr) => (arr, true),
-        None => (&empty_vec, false),
+    else {
+        return Ok(0);
     };
     let placeholders = vec!["?"; definition.columns.len()].join(", ");
+    let conflict_cols = definition
+        .conflict_column
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>();
     let updates = definition
         .columns
         .iter()
-        .filter(|column| **column != definition.conflict_column)
+        .filter(|column| !conflict_cols.contains(column))
         .map(|column| format!("{column} = excluded.{column}"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -552,57 +829,88 @@ fn apply_table(
         .filter(|key| !key.is_empty())
         .collect::<HashSet<_>>();
 
-    for row in rows {
-        let key = entity_key(row, definition.entity_column);
-        if key.is_empty() || row_has_unsynced_change(transaction, definition, row, &key)? {
-            continue;
-        }
+    // Kalau tabel lokal benar-benar kosong sementara server mengirim baris, cache
+    // hash tidak boleh dipercaya (mis. tabel sempat dikosongkan di luar aplikasi).
+    // Tulis ulang semuanya sekali supaya drift seperti itu sembuh sendiri.
+    let distrust_hash_cache = !rows.is_empty()
+        && transaction
+            .query_row(
+                &format!(
+                    "SELECT NOT EXISTS(SELECT 1 FROM {} LIMIT 1);",
+                    definition.table
+                ),
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
 
-        if definition.domain == "log-scan" {
-            let ts = entity_key(row, "timestamp_scan");
-            let emp = entity_key(row, "id_karyawan");
-            let kind = entity_key(row, "jenis_scan");
-            let tgl = entity_key(row, "tanggal_kerja");
-            let ref_id = entity_key(row, "id_referensi");
-            // Bersihkan baris log scan lokal sementara (id_log < 0) yang cocok sebelum memasukkan baris server
-            let _ = transaction.execute(
-                "DELETE FROM log_scan WHERE id_log < 0 AND tanggal_kerja = ? AND id_karyawan = ? AND (jenis_scan = ? OR (id_referensi = ? AND id_referensi != '') OR timestamp_scan = ?);",
-                params![tgl, emp, kind, ref_id, ts],
-            );
-        }
+    let mut written = 0usize;
+    {
+        let mut upsert_row = transaction
+            .prepare_cached(&statement)
+            .map_err(|err| sync_table_error(definition.table, err))?;
+        let mut upsert_revision = transaction
+            .prepare_cached(REVISION_UPSERT_SQL)
+            .map_err(|_| CommandError::internal())?;
 
-        let values = definition
-            .columns
-            .iter()
-            .map(|column| sql_value(row.get(*column)))
-            .collect::<Vec<_>>();
-        transaction
-            .execute(&statement, rusqlite::params_from_iter(values))
-            .map_err(|_| sync_table_error(definition.table))?;
-        let mut hasher = Sha256::new();
-        hasher.update(row.to_string().as_bytes());
-        transaction
-            .execute(
-                r#"
-        INSERT INTO desktop_entity_revision (
-          domain, entity_key, server_revision, payload_hash, updated_at
-        ) VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(domain, entity_key) DO UPDATE SET
-          server_revision = excluded.server_revision,
-          payload_hash = excluded.payload_hash,
-          updated_at = excluded.updated_at;
-        "#,
-                params![
+        for row in rows {
+            let key = entity_key(row, definition.entity_column);
+            if key.is_empty() || guard.row_has_unsynced_change(definition, row, &key) {
+                continue;
+            }
+            // Konfigurasi koneksi milik perangkat lain tidak boleh menimpa milik kita.
+            if definition.domain == "setting" && is_device_local_setting(&key) {
+                continue;
+            }
+
+            // Lewati baris yang isinya persis sama dengan yang sudah tersimpan.
+            // Inilah yang memangkas mayoritas tulisan: snapshot penuh biasanya
+            // hanya berbeda di segelintir baris, sisanya identik.
+            let payload_hash = row_payload_hash(definition.table, row);
+            let cache_key = guard_key(definition.domain, &key);
+            if !distrust_hash_cache
+                && hashes
+                    .get(&cache_key)
+                    .is_some_and(|previous| previous == &payload_hash)
+            {
+                continue;
+            }
+
+            if definition.domain == "log-scan" {
+                let ts = entity_key(row, "timestamp_scan");
+                let emp = entity_key(row, "id_karyawan");
+                let kind = entity_key(row, "jenis_scan");
+                let tgl = entity_key(row, "tanggal_kerja");
+                let ref_id = entity_key(row, "id_referensi");
+                // Bersihkan baris log scan lokal sementara (id_log < 0) yang cocok sebelum memasukkan baris server
+                let _ = transaction.execute(
+                    "DELETE FROM log_scan WHERE id_log < 0 AND tanggal_kerja = ? AND id_karyawan = ? AND (jenis_scan = ? OR (id_referensi = ? AND id_referensi != '') OR timestamp_scan = ?);",
+                    params![tgl, emp, kind, ref_id, ts],
+                );
+            }
+
+            let values = definition
+                .columns
+                .iter()
+                .map(|column| sql_value(row.get(*column)))
+                .collect::<Vec<_>>();
+            upsert_row
+                .execute(rusqlite::params_from_iter(values))
+                .map_err(|err| sync_table_error(definition.table, err))?;
+            upsert_revision
+                .execute(params![
                     definition.domain,
                     key,
                     revision,
-                    hex::encode(hasher.finalize()),
+                    payload_hash,
                     storage::now_epoch_seconds(),
-                ],
-            )
-            .map_err(|_| CommandError::internal())?;
+                ])
+                .map_err(|_| CommandError::internal())?;
+            hashes.insert(cache_key, payload_hash);
+            written += 1;
+        }
     }
-    if definition.delete_missing && present {
+    if definition.delete_missing {
         let select = format!(
             "SELECT CAST({} AS TEXT) FROM {};",
             definition.entity_column, definition.table
@@ -621,19 +929,15 @@ fn apply_table(
             definition.table, definition.entity_column
         );
         for key in local_keys {
-            if snapshot_keys.contains(&key)
-                || has_unsynced_change(transaction, definition.domain, &key)?
-            {
+            if snapshot_keys.contains(&key) || guard.has(definition.domain, &key) {
                 continue;
             }
-            let came_from_server = transaction
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM desktop_entity_revision WHERE domain = ? AND entity_key = ?);",
-                    params![definition.domain, key],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(|_| CommandError::internal())?;
+            let cache_key = guard_key(definition.domain, &key);
+            // Jejak `desktop_entity_revision` sudah dimuat di awal apply_snapshot,
+            // jadi asal-usul baris diperiksa dari memori, bukan query per baris.
+            let came_from_server = hashes.contains_key(&cache_key);
             if !came_from_server {
+                // Baris lokal murni yang tidak pernah datang dari server: jangan dihapus.
                 continue;
             }
             transaction
@@ -645,14 +949,16 @@ fn apply_table(
                     params![definition.domain, key],
                 )
                 .map_err(|_| CommandError::internal())?;
+            hashes.remove(&cache_key);
+            written += 1;
         }
     }
-    Ok(())
+    Ok(written)
 }
 
 pub fn ensure_client_id(state: &MobileState) -> Result<String, CommandError> {
-    let connection = storage::database(&state.data_dir)?;
     let server_origin = state.server_origin();
+    let connection = storage::database(&state.data_dir)?;
     if let Ok(client_id) = connection.query_row(
         "SELECT client_id FROM desktop_client_identity WHERE server_origin = ?;",
         [&server_origin],
@@ -729,15 +1035,23 @@ pub fn enqueue(
             format!("Event sinkronisasi tidak valid: {domain}/{operation}."),
         ));
     }
+    // Penjagaan terakhir: konfigurasi koneksi perangkat tidak boleh masuk outbox.
+    if domain == "setting" && is_device_local_setting(entity_key) {
+        return Err(CommandError::new(
+            "DESKTOP_SYNC_EVENT_INVALID",
+            format!("Pengaturan '{entity_key}' bersifat lokal perangkat dan tidak disinkronkan."),
+        ));
+    }
     let event_id = new_event_id(client_id, domain, operation);
     let now = storage::now_epoch_seconds();
     transaction
         .execute(
             r#"
       INSERT INTO desktop_sync_outbox (
-        event_id, client_id, domain, operation, entity_key, payload_json,
-        base_revision, status, attempt_count, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?);
+        event_id, client_id, domain, operation, entity_key,
+        payload_json, base_revision, status, attempt_count,
+        next_retry_at, last_error, server_revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, ?, ?);
       "#,
             params![
                 event_id,
@@ -755,7 +1069,75 @@ pub fn enqueue(
     Ok(event_id)
 }
 
-pub fn apply_snapshot(state: &MobileState, payload: &Value) -> Result<(), CommandError> {
+/// Nilai `sync_pulse` cloud yang terakhir berhasil diterapkan, per tabel.
+fn load_table_cursors(state: &MobileState) -> Result<HashMap<String, i64>, CommandError> {
+    let connection = storage::database(&state.data_dir)?;
+    let mut statement = connection
+        .prepare("SELECT table_name, remote_revision FROM desktop_sync_table_cursor;")
+        .map_err(|_| CommandError::internal())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|_| CommandError::internal())?;
+    let mut cursors = HashMap::new();
+    for row in rows {
+        let (table, revision) = row.map_err(|_| CommandError::internal())?;
+        cursors.insert(table, revision);
+    }
+    Ok(cursors)
+}
+
+/// Membaca sidik jari baris yang terakhir diterapkan dari server, sekali saja
+/// untuk seluruh snapshot. Dipakai `apply_table` untuk melewatkan baris yang
+/// tidak berubah tanpa satu pun query tambahan per baris.
+fn load_revision_hashes(
+    transaction: &Transaction<'_>,
+) -> Result<HashMap<String, String>, CommandError> {
+    let mut statement = transaction
+        .prepare("SELECT domain, entity_key, payload_hash FROM desktop_entity_revision;")
+        .map_err(|_| CommandError::internal())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|_| CommandError::internal())?;
+    let mut hashes = HashMap::new();
+    for row in rows {
+        let (domain, key, hash) = row.map_err(|_| CommandError::internal())?;
+        hashes.insert(guard_key(&domain, &key), hash);
+    }
+    Ok(hashes)
+}
+
+pub fn apply_snapshot(state: &MobileState, payload: &Value) -> Result<usize, CommandError> {
+    apply_snapshot_with_pulse(state, payload, None)
+}
+
+/// Menerapkan snapshot cloud ke SQLite lokal dalam satu transaksi.
+///
+/// `pulse` adalah nilai `sync_pulse` cloud saat snapshot ini diambil. Nilainya
+/// dicatat per tabel HANYA untuk tabel yang benar-benar ikut dikirim, sehingga
+/// pull berikutnya tahu persis tabel mana yang masih basi.
+pub fn apply_snapshot_with_pulse(
+    state: &MobileState,
+    payload: &Value,
+    pulse: Option<&HashMap<String, i64>>,
+) -> Result<usize, CommandError> {
+    // Pastikan skema lokal sudah memuat seluruh tabel snapshot terbaru (mis. id_card_template,
+    // company_profile) sebelum menerapkan data server. Tanpa ini, client dengan skema lokal yang
+    // tertinggal (belum sempat relaunch sejak tabel baru ditambahkan) akan gagal total di tengah
+    // transaksi apply_table dan me-rollback SELURUH snapshot, bukan hanya tabel yang hilang.
+    storage::initialize(&state.data_dir).map_err(|_| {
+        CommandError::new(
+            "DESKTOP_SCHEMA_MIGRATION_FAILED",
+            "Skema database lokal tidak dapat disiapkan sebelum menerapkan snapshot sinkronisasi.",
+        )
+    })?;
     let snapshot = payload.get("snapshot").unwrap_or(payload);
     let revision = snapshot
         .get("revision")
@@ -763,27 +1145,78 @@ pub fn apply_snapshot(state: &MobileState, payload: &Value) -> Result<(), Comman
         .filter(|revision| *revision >= 0)
         .ok_or_else(CommandError::internal)?;
     let mut connection = storage::database(&state.data_dir)?;
-    let current_revision = connection
-        .query_row(
-            "SELECT last_revision FROM desktop_sync_cursor WHERE domain = 'operational';",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or_default();
-    if revision < current_revision {
-        return Err(CommandError::internal());
-    }
     let transaction = connection
         .transaction()
         .map_err(|_| CommandError::internal())?;
-    reconcile_shift_ids(&transaction, snapshot)?;
-    for definition in SNAPSHOT_TABLES {
-        apply_table(&transaction, snapshot, definition, revision)?;
+    // Snapshot yang revisinya lebih tua daripada cursor lokal adalah data basi —
+    // misalnya replika cloud yang tertinggal. Menerapkannya akan memundurkan
+    // cursor dan menimpa baris lokal dengan versi lama.
+    let local_revision: i64 = transaction
+        .query_row(
+            "SELECT last_revision FROM desktop_sync_cursor WHERE domain = 'operational';",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if revision < local_revision {
+        return Err(CommandError::new(
+            "DESKTOP_SYNC_SNAPSHOT_STALE",
+            format!(
+                "Snapshot cloud revisi {revision} lebih tua daripada data lokal revisi {local_revision}. Snapshot diabaikan agar data terbaru tidak tertimpa."
+            ),
+        ));
     }
 
-    // Bersihkan temporary local log_scan (id_log < 0) jika sudah ada baris server permanen yang cocok
-    let _ = transaction.execute(
-        r#"
+    let guard = PendingGuard::load(&transaction)?;
+    let mut hashes = load_revision_hashes(&transaction)?;
+    reconcile_shift_ids(&transaction, &guard, snapshot)?;
+    let mut written = 0usize;
+    for definition in SNAPSHOT_TABLES {
+        written += apply_table(
+            &transaction,
+            &guard,
+            &mut hashes,
+            snapshot,
+            definition,
+            revision,
+        )?;
+    }
+
+    // Catat pulse cloud per tabel. Pemanggil hanya mengirim entri untuk tabel
+    // yang benar-benar ikut ditarik; tabel lain tetap memakai cursor lamanya
+    // sehingga pull berikutnya masih menganggapnya basi.
+    if let Some(pulse) = pulse {
+        for (table, remote_revision) in pulse {
+            transaction
+                .execute(
+                    r#"
+          INSERT INTO desktop_sync_table_cursor (table_name, remote_revision, updated_at)
+          VALUES (?, ?, ?)
+          ON CONFLICT(table_name) DO UPDATE SET
+            remote_revision = excluded.remote_revision,
+            updated_at = excluded.updated_at;
+          "#,
+                    params![table, remote_revision, storage::now_epoch_seconds()],
+                )
+                .map_err(|_| CommandError::internal())?;
+        }
+    }
+
+    // Bersihkan temporary local log_scan (id_log < 0) jika sudah ada baris server
+    // permanen yang cocok. Dijalankan juga ketika tidak ada baris baru: baris
+    // sementara bisa tertinggal dari siklus sebelumnya, misalnya ketika baris
+    // server-nya sempat dilewati karena outbox-nya masih pending.
+    // `id_log` adalah rowid, jadi penjagaan `id_log < 0` di bawah nyaris gratis.
+    let has_temporary_scan_logs = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM log_scan WHERE id_log < 0);",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if has_temporary_scan_logs {
+        let _ = transaction.execute(
+            r#"
         DELETE FROM log_scan
         WHERE id_log < 0
           AND EXISTS (
@@ -794,8 +1227,9 @@ pub fn apply_snapshot(state: &MobileState, payload: &Value) -> Result<(), Comman
               AND s2.jenis_scan = log_scan.jenis_scan
           );
         "#,
-        [],
-    );
+            [],
+        );
+    }
 
     transaction
         .execute(
@@ -809,7 +1243,10 @@ pub fn apply_snapshot(state: &MobileState, payload: &Value) -> Result<(), Comman
             params![revision, storage::now_epoch_seconds()],
         )
         .map_err(|_| CommandError::internal())?;
-    transaction.commit().map_err(|_| CommandError::internal())
+    transaction
+        .commit()
+        .map_err(|_| CommandError::internal())
+        .map(|()| written)
 }
 
 pub async fn pull_snapshot(
@@ -827,9 +1264,46 @@ pub async fn pull_snapshot(
                 )
                 .unwrap_or((0, None))
         };
-        let payload = turso.pull_snapshot(last_rev).await?;
-        apply_snapshot(state, &payload)?;
-        return status(state);
+
+        // Probe murah sebelum menarik apa pun: satu query kecil ke `sync_pulse`
+        // memberi tahu tabel mana saja yang berubah sejak pull terakhir. Trigger
+        // pulse di cloud ikut naik untuk penulisan dari perangkat lain MAUPUN
+        // dari route handler Web yang menulis langsung ke Turso, jadi probe ini
+        // tidak bisa melewatkan perubahan. Bila tidak ada yang berubah, siklus
+        // sync selesai tanpa menarik satu baris pun.
+        let pulse = turso.fetch_sync_pulse().await?;
+        let wanted = match pulse.as_ref() {
+            Some(pulse) => {
+                let local = load_table_cursors(state)?;
+                let stale = pulse
+                    .iter()
+                    .filter(|(table, remote)| local.get(table.as_str()) != Some(remote))
+                    .map(|(table, _)| table.clone())
+                    .collect::<HashSet<String>>();
+                if stale.is_empty() {
+                    return status(state);
+                }
+                Some(stale)
+            }
+            // Database cloud lama tanpa tabel pulse: jatuh ke pull penuh.
+            None => None,
+        };
+
+        let payload = turso.pull_snapshot_tables(last_rev, wanted.as_ref()).await?;
+        let applied_pulse = pulse.as_ref().map(|pulse| {
+            pulse
+                .iter()
+                .filter(|(table, _)| match wanted.as_ref() {
+                    None => true,
+                    Some(stale) => stale.contains(table.as_str()),
+                })
+                .map(|(table, revision)| (table.clone(), *revision))
+                .collect::<HashMap<String, i64>>()
+        });
+        let written = apply_snapshot_with_pulse(state, &payload, applied_pulse.as_ref())?;
+        let mut result = status(state)?;
+        result.changed_rows = i64::try_from(written).unwrap_or(i64::MAX);
+        return Ok(result);
     }
 
     if !token.is_empty() {
@@ -841,7 +1315,10 @@ pub async fn pull_snapshot(
             token,
         )
         .await?;
-        apply_snapshot(state, &payload)?;
+        let written = apply_snapshot(state, &payload)?;
+        let mut result = status(state)?;
+        result.changed_rows = i64::try_from(written).unwrap_or(i64::MAX);
+        return Ok(result);
     }
     status(state)
 }
@@ -892,7 +1369,15 @@ fn pending_events(state: &MobileState) -> Result<(String, Vec<Value>), CommandEr
       FROM desktop_sync_outbox
       WHERE status = 'pending'
          OR (status = 'failed' AND next_retry_at IS NOT NULL AND next_retry_at <= ?)
-         OR (status = 'conflict' AND operation = 'create' AND (
+         -- Konflik UNIQUE pada shift/karyawan memang layak dicoba ulang: baris
+         -- kembarannya biasanya sudah direkonsiliasi oleh pull berikutnya.
+         -- Tetapi retry-nya WAJIB ikut backoff. Tanpa `next_retry_at`, konflik
+         -- yang tidak pernah bisa selesai (mis. kode_shift yang memang benar-benar
+         -- dobel) akan didorong ulang ke cloud setiap siklus 30 detik selamanya,
+         -- menghabiskan kuota dan baterai perangkat lapangan.
+         OR (status = 'conflict' AND operation = 'create'
+             AND (next_retry_at IS NULL OR next_retry_at <= ?)
+             AND (
               (domain = 'shift' AND last_error LIKE '%UNIQUE constraint failed: tbl_shift.kode_shift%')
               OR (domain = 'employee' AND last_error LIKE '%UNIQUE constraint failed: master_data.id_unik%')
             ))
@@ -903,8 +1388,9 @@ fn pending_events(state: &MobileState) -> Result<(String, Vec<Value>), CommandEr
       "#,
         )
         .map_err(|_| CommandError::internal())?;
+    let now = storage::now_epoch_seconds();
     let rows = statement
-        .query_map([storage::now_epoch_seconds()], |row| {
+        .query_map([now, now], |row| {
             let payload: String = row.get(5)?;
             Ok(json!({
                 "eventId": row.get::<_, String>(0)?,
@@ -1214,15 +1700,32 @@ fn apply_push_results(
                 }
             }
         } else if sync_status == "conflict" {
+            // Konflik ikut menaikkan `attempt_count` dan menjadwalkan
+            // `next_retry_at` dengan backoff eksponensial yang sama seperti
+            // kegagalan biasa. Hanya konflik UNIQUE shift/karyawan yang benar-benar
+            // diambil ulang oleh `pending_events`, tetapi tanpa jadwal ini konflik
+            // itu didorong ulang setiap siklus 30 detik tanpa henti — termasuk
+            // konflik yang memang tidak akan pernah selesai.
+            let attempt: i64 = transaction
+                .query_row(
+                    "SELECT attempt_count FROM desktop_sync_outbox WHERE event_id = ?;",
+                    [event_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_default();
+            let exponent = u32::try_from(attempt.clamp(0, 8)).unwrap_or_default();
+            let delay = 5_i64.saturating_mul(2_i64.saturating_pow(exponent));
             transaction
                 .execute(
                     r#"
           UPDATE desktop_sync_outbox SET status = 'conflict', last_error = ?,
-            server_revision = ?, updated_at = ? WHERE event_id = ?;
+            server_revision = ?, attempt_count = attempt_count + 1,
+            next_retry_at = ?, updated_at = ? WHERE event_id = ?;
           "#,
                     params![
                         message,
                         server_revision,
+                        storage::now_epoch_seconds() + delay,
                         storage::now_epoch_seconds(),
                         event_id,
                     ],
@@ -1263,12 +1766,355 @@ fn apply_push_results(
     transaction.commit().map_err(|_| CommandError::internal())
 }
 
+fn ensure_unsynced_payroll_data_enqueued(state: &MobileState) -> Result<(), CommandError> {
+    let client_id = match ensure_client_id(state) {
+        Ok(id) => id,
+        Err(_) => return Ok(()),
+    };
+    let mut connection = match storage::database(&state.data_dir) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+    let transaction = match connection.transaction() {
+        Ok(t) => t,
+        Err(_) => return Ok(()),
+    };
+
+    // 1. Salary Configs
+    if let Ok(mut stmt) = transaction.prepare(
+        "SELECT id, id_karyawan, rate_per_hour, ptkp_status, effective_date, created_by, created_at
+         FROM salary_configs
+         WHERE id NOT IN (
+             SELECT entity_key FROM desktop_sync_outbox WHERE domain = 'payroll' AND operation = 'salary-config'
+         ) AND id NOT IN (
+             SELECT entity_key FROM desktop_entity_revision WHERE domain = 'payroll'
+         );",
+    ) {
+        if let Ok(rows) = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .and_then(|mapped| mapped.collect::<Result<Vec<_>, _>>())
+        {
+            drop(stmt);
+            for (id, id_karyawan, rate_per_hour, ptkp_status, effective_date, created_by, created_at) in rows {
+                let payload = json!({
+                    "id": id,
+                    "id_karyawan": id_karyawan,
+                    "rate_per_hour": rate_per_hour,
+                    "ptkp_status": ptkp_status,
+                    "effective_date": effective_date,
+                    "created_by": created_by,
+                    "created_at": created_at,
+                });
+                let _ = enqueue(&transaction, &client_id, "payroll", "salary-config", &id, &payload, None);
+            }
+        }
+    }
+
+    // Baris tarif default sudah disediakan seed di sisi lokal MAUPUN cloud, jadi
+    // tidak boleh ikut didorong backfill. Kalau ikut, instalasi baru akan
+    // menimpa tarif yang sudah disesuaikan admin dengan nilai bawaan.
+    let default_rate_ids = payroll_seed::DEFAULT_RATE_IDS
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // 2. Overtime Tier Rules
+    if let Ok(mut stmt) = transaction.prepare(&format!(
+        "SELECT id, rule_type, tier_order, hour_start, hour_end, multiplier, is_active
+         FROM overtime_tier_rules
+         WHERE id NOT IN (
+             SELECT entity_key FROM desktop_sync_outbox WHERE domain = 'payroll' AND operation = 'overtime-rule'
+         ) AND id NOT IN (
+             SELECT entity_key FROM desktop_entity_revision WHERE domain = 'payroll'
+         ) AND id NOT IN ({default_rate_ids});"
+    )) {
+        if let Ok(rows) = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, Option<f64>>(4)?,
+                    row.get::<_, f64>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .and_then(|mapped| mapped.collect::<Result<Vec<_>, _>>())
+        {
+            drop(stmt);
+            for (id, rule_type, tier_order, hour_start, hour_end, multiplier, is_active) in rows {
+                let payload = json!({
+                    "id": id,
+                    "rule_type": rule_type,
+                    "tier_order": tier_order,
+                    "hour_start": hour_start,
+                    "hour_end": hour_end,
+                    "multiplier": multiplier,
+                    "is_active": is_active,
+                });
+                let _ = enqueue(&transaction, &client_id, "payroll", "overtime-rule", &id, &payload, None);
+            }
+        }
+    }
+
+    // 3. Tax Rules
+    if let Ok(mut stmt) = transaction.prepare(&format!(
+        "SELECT id, category, bracket_min, bracket_max, rate_percentage, effective_date
+         FROM tax_rules
+         WHERE id NOT IN (
+             SELECT entity_key FROM desktop_sync_outbox WHERE domain = 'payroll' AND operation = 'tax-rule'
+         ) AND id NOT IN (
+             SELECT entity_key FROM desktop_entity_revision WHERE domain = 'payroll'
+         ) AND id NOT IN ({default_rate_ids});"
+    )) {
+        if let Ok(rows) = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .and_then(|mapped| mapped.collect::<Result<Vec<_>, _>>())
+        {
+            drop(stmt);
+            for (id, category, bracket_min, bracket_max, rate_percentage, effective_date) in rows {
+                let payload = json!({
+                    "id": id,
+                    "category": category,
+                    "bracket_min": bracket_min,
+                    "bracket_max": bracket_max,
+                    "rate_percentage": rate_percentage,
+                    "effective_date": effective_date,
+                });
+                let _ = enqueue(&transaction, &client_id, "payroll", "tax-rule", &id, &payload, None);
+            }
+        }
+    }
+
+    // 4. BPJS Rules
+    if let Ok(mut stmt) = transaction.prepare(&format!(
+        "SELECT id, component_code, component_name, rate_percentage, wage_cap, effective_date
+         FROM bpjs_rules
+         WHERE id NOT IN (
+             SELECT entity_key FROM desktop_sync_outbox WHERE domain = 'payroll' AND operation = 'bpjs-rule'
+         ) AND id NOT IN (
+             SELECT entity_key FROM desktop_entity_revision WHERE domain = 'payroll'
+         ) AND id NOT IN ({default_rate_ids});"
+    )) {
+        if let Ok(rows) = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .and_then(|mapped| mapped.collect::<Result<Vec<_>, _>>())
+        {
+            drop(stmt);
+            for (id, component_code, component_name, rate_percentage, wage_cap, effective_date) in rows {
+                let payload = json!({
+                    "id": id,
+                    "component_code": component_code,
+                    "component_name": component_name,
+                    "rate_percentage": rate_percentage,
+                    "wage_cap": wage_cap,
+                    "effective_date": effective_date,
+                });
+                let _ = enqueue(&transaction, &client_id, "payroll", "bpjs-rule", &id, &payload, None);
+            }
+        }
+    }
+
+    // 5. Payroll Components
+    if let Ok(mut stmt) = transaction.prepare(
+        "SELECT id, name, category, calc_type, default_value, applies_to, is_active
+         FROM payroll_components
+         WHERE id NOT IN (
+             SELECT entity_key FROM desktop_sync_outbox WHERE domain = 'payroll' AND operation = 'payroll-component'
+         ) AND id NOT IN (
+             SELECT entity_key FROM desktop_entity_revision WHERE domain = 'payroll'
+         );",
+    ) {
+        if let Ok(rows) = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .and_then(|mapped| mapped.collect::<Result<Vec<_>, _>>())
+        {
+            drop(stmt);
+            for (id, name, category, calc_type, default_value, applies_to, is_active) in rows {
+                let payload = json!({
+                    "id": id,
+                    "name": name,
+                    "category": category,
+                    "calc_type": calc_type,
+                    "default_value": default_value,
+                    "applies_to": applies_to,
+                    "is_active": is_active,
+                });
+                let _ = enqueue(&transaction, &client_id, "payroll", "payroll-component", &id, &payload, None);
+            }
+        }
+    }
+
+    // 6. Payroll Runs
+    if let Ok(mut stmt) = transaction.prepare(
+        "SELECT id, idempotency_key, period_start, period_end, status,
+                total_gross_payout, total_net_payout, total_employees,
+                created_by, created_at, updated_at
+         FROM payroll_runs
+         WHERE id NOT IN (
+             SELECT entity_key FROM desktop_sync_outbox WHERE domain = 'payroll' AND operation = 'create-run'
+         ) AND id NOT IN (
+             SELECT entity_key FROM desktop_entity_revision WHERE domain = 'payroll'
+         );",
+    ) {
+        if let Ok(runs) = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                ))
+            })
+            .and_then(|mapped| mapped.collect::<Result<Vec<_>, _>>())
+        {
+            drop(stmt);
+            for (id, idempotency_key, period_start, period_end, status, total_gross_payout, total_net_payout, total_employees, created_by, created_at, updated_at) in runs {
+                let items: Vec<Value> = if let Ok(mut item_stmt) = transaction.prepare(
+                    "SELECT id, id_karyawan, nama_karyawan, divisi, ptkp_status,
+                            total_regular_hours, total_overtime_hours, total_overtime_index,
+                            rate_per_hour, basic_salary, overtime_salary, gross_salary,
+                            total_allowances, total_deductions, bpjs_employee_total, bpjs_company_total,
+                            pph21_amount, net_salary, breakdown_snapshot, created_at
+                     FROM payroll_items
+                     WHERE payroll_run_id = ?;",
+                ) {
+                    let mapped_items = item_stmt.query_map([&id], |row| {
+                        Ok(json!({
+                            "id": row.get::<_, String>(0)?,
+                            "id_karyawan": row.get::<_, String>(1)?,
+                            "nama_karyawan": row.get::<_, String>(2)?,
+                            "divisi": row.get::<_, String>(3)?,
+                            "ptkp_status": row.get::<_, String>(4)?,
+                            "total_regular_hours": row.get::<_, f64>(5)?,
+                            "total_overtime_hours": row.get::<_, f64>(6)?,
+                            "total_overtime_index": row.get::<_, f64>(7)?,
+                            "rate_per_hour": row.get::<_, i64>(8)?,
+                            "basic_salary": row.get::<_, i64>(9)?,
+                            "overtime_salary": row.get::<_, i64>(10)?,
+                            "gross_salary": row.get::<_, i64>(11)?,
+                            "total_allowances": row.get::<_, i64>(12)?,
+                            "total_deductions": row.get::<_, i64>(13)?,
+                            "bpjs_employee_total": row.get::<_, i64>(14)?,
+                            "bpjs_company_total": row.get::<_, i64>(15)?,
+                            "pph21_amount": row.get::<_, i64>(16)?,
+                            "net_salary": row.get::<_, i64>(17)?,
+                            "breakdown_snapshot": row.get::<_, String>(18)?,
+                            "created_at": row.get::<_, String>(19)?,
+                        }))
+                    });
+                    mapped_items.map(|iter| iter.filter_map(|r| r.ok()).collect()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                let payload = json!({
+                    "run": {
+                        "id": id,
+                        "idempotency_key": idempotency_key,
+                        "period_start": period_start,
+                        "period_end": period_end,
+                        "status": status,
+                        "total_gross_payout": total_gross_payout,
+                        "total_net_payout": total_net_payout,
+                        "total_employees": total_employees,
+                        "created_by": created_by,
+                        "created_at": created_at,
+                        "updated_at": updated_at,
+                    },
+                    "items": items,
+                    "audit": {
+                        "id": format!("aud-{}", id),
+                        "payroll_run_id": id,
+                        "action": "AUTO_SYNC_BACKFILL",
+                        "old_status": Value::Null,
+                        "new_status": status,
+                        "performed_by": created_by,
+                        "notes": "Backfill otomatis outbox sinkronisasi.",
+                        "created_at": created_at,
+                    }
+                });
+                let _ = enqueue(&transaction, &client_id, "payroll", "create-run", &id, &payload, None);
+            }
+        }
+    }
+
+    let _ = transaction.commit();
+    Ok(())
+}
+
+/// Batas jumlah batch yang boleh dikirim dalam satu siklus push.
+///
+/// Loop push berhenti ketika satu batch berisi kurang dari 50 event. Kalau
+/// seluruh 50 event dalam batch berakhir sebagai `conflict` yang layak dicoba
+/// ulang, `pending_events` bisa mengembalikan 50 baris yang sama persis pada
+/// putaran berikutnya dan loop tidak pernah berhenti. Batas ini memastikan
+/// siklus selalu selesai; sisa antrean ikut siklus berikutnya.
+const MAX_PUSH_BATCHES_PER_CYCLE: usize = 40;
+
 pub async fn push_outbox(state: &MobileState, token: &str) -> Result<(), CommandError> {
+    let _ = ensure_unsynced_payroll_data_enqueued(state);
     if let Ok(turso) = state.get_turso_client() {
-        loop {
+        // Diperiksa sekali per siklus push, dan hanya bila benar-benar ada yang
+        // dikirim, supaya sync idle tidak menambah round-trip ke Turso.
+        let mut schema_checked = false;
+        for _ in 0..MAX_PUSH_BATCHES_PER_CYCLE {
             let (_client_id, events) = pending_events(state)?;
             if events.is_empty() {
                 return Ok(());
+            }
+            if !schema_checked {
+                // Sengaja sebelum mark_batch_failed mana pun: event tetap
+                // `pending` dan akan terkirim lagi setelah aplikasi diperbarui.
+                assert_cloud_schema_compatible(&turso).await?;
+                schema_checked = true;
             }
             let event_ids = events
                 .iter()
@@ -1296,10 +2142,11 @@ pub async fn push_outbox(state: &MobileState, token: &str) -> Result<(), Command
                 return Ok(());
             }
         }
+        return Ok(());
     }
 
     if !token.is_empty() {
-        loop {
+        for _ in 0..MAX_PUSH_BATCHES_PER_CYCLE {
             let (client_id, events) = pending_events(state)?;
             if events.is_empty() {
                 return Ok(());
@@ -1313,7 +2160,11 @@ pub async fn push_outbox(state: &MobileState, token: &str) -> Result<(), Command
                 state,
                 reqwest::Method::POST,
                 "/api/sync/push",
-                Some(json!({ "clientId": client_id, "events": events })),
+                Some(json!({
+                    "clientId": client_id,
+                    "schemaVersion": CLIENT_SCHEMA_VERSION,
+                    "events": events,
+                })),
                 token,
             )
             .await;
@@ -1345,12 +2196,138 @@ pub async fn push_outbox(state: &MobileState, token: &str) -> Result<(), Command
     Ok(())
 }
 
+/// Satu siklus sinkronisasi penuh: kirim antrean lokal, lalu tarik perubahan cloud.
+///
+/// Push yang gagal sengaja TIDAK menghentikan pull. Sebelumnya `push_outbox(...)?`
+/// langsung mengembalikan error, sehingga satu event outbox yang bermasalah
+/// (atau satu gangguan jaringan sesaat) mematikan pull selamanya — perangkat
+/// berhenti menerima data cloud sama sekali. Sekarang kegagalan push tetap
+/// tercatat di outbox dengan backoff, dan dilaporkan lewat `push_error`.
+/// Penjaga agar hanya satu siklus sinkronisasi berjalan pada satu waktu.
+///
+/// Auto-sync berkala, tombol sync manual, dan push setelah scan bisa datang
+/// hampir bersamaan. Menjalankannya paralel tidak mempercepat apa pun — keduanya
+/// hanya berebut kunci tulis SQLite lokal dan berisiko "database is locked".
+static SYNC_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+struct SyncInFlightGuard;
+
+impl Drop for SyncInFlightGuard {
+    fn drop(&mut self) {
+        SYNC_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
 pub async fn synchronize(
     state: &MobileState,
     token: &str,
 ) -> Result<MobileSyncStatus, CommandError> {
-    push_outbox(state, token).await?;
-    pull_snapshot(state, token).await
+    if SYNC_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        // Siklus lain sedang berjalan; laporkan status terkini saja.
+        return status(state);
+    }
+    let _in_flight = SyncInFlightGuard;
+
+    let push_error = push_outbox(state, token).await.err();
+    let pulled = pull_snapshot(state, token).await;
+
+    // Penegakan RBAC dinamis untuk jalur 2-tier. Sesi Desktop/Mobile hidup di
+    // memori sampai aplikasi ditutup, jadi tanpa langkah ini operator yang baru
+    // saja dinonaktifkan atau dicabut permission-nya tetap memegang akses penuh
+    // di perangkatnya. Sisi web sudah memeriksa `rbac_revision` pada setiap
+    // request; perangkat memeriksanya sekali per siklus sinkronisasi.
+    enforce_rbac_revision(state).await;
+
+    match pulled {
+        Ok(mut status) => {
+            status.push_error = push_error.map(|error| error.message);
+            Ok(status)
+        }
+        Err(pull_error) => Err(push_error.unwrap_or(pull_error)),
+    }
+}
+
+/// Cabut atau segarkan sesi aktif bila katalog RBAC cloud sudah berubah.
+///
+/// Sengaja tidak mengembalikan error: ini pekerjaan latar di akhir siklus sync,
+/// dan kegagalan jaringan TIDAK boleh menjatuhkan sinkronisasi yang sudah
+/// berhasil — apalagi mencabut sesi. Sesi hanya dicabut ketika cloud menjawab
+/// dengan pasti bahwa operatornya sudah tidak aktif.
+async fn enforce_rbac_revision(state: &MobileState) {
+    let Some((operator_id, known_revision)) = ({
+        let Ok(guard) = state.session.lock() else {
+            return;
+        };
+        guard
+            .as_ref()
+            .map(|session| (session.operator.id, session.operator.permission_revision))
+    }) else {
+        return;
+    };
+
+    // `rbac_revision` ikut tersinkronisasi lewat `setting_gex_system`, jadi
+    // perbandingannya dibaca dari SQLite lokal — nol round-trip tambahan pada
+    // kasus normal ketika tidak ada perubahan role sama sekali.
+    let Ok(connection) = storage::database(&state.data_dir) else {
+        return;
+    };
+    let local_revision: Option<i64> = connection
+        .query_row(
+            "SELECT value FROM setting_gex_system WHERE key = 'rbac_revision' LIMIT 1;",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok());
+    drop(connection);
+
+    let Some(local_revision) = local_revision else {
+        return;
+    };
+    if local_revision == known_revision {
+        return;
+    }
+
+    let Ok(turso) = state.get_turso_client() else {
+        return;
+    };
+    match turso.reload_operator(operator_id).await {
+        Ok(Some(refreshed)) => {
+            if let Ok(mut guard) = state.session.lock() {
+                if let Some(session) = guard.as_mut() {
+                    // Hanya perbarui bila sesi masih milik operator yang sama:
+                    // pengguna bisa saja logout lalu login sebagai orang lain
+                    // selama query di atas berjalan.
+                    if session.operator.id == operator_id {
+                        session.operator = refreshed;
+                    }
+                }
+            }
+        }
+        Ok(None) => {
+            if let Ok(mut guard) = state.session.lock() {
+                if guard
+                    .as_ref()
+                    .is_some_and(|session| session.operator.id == operator_id)
+                {
+                    *guard = None;
+                }
+            }
+            storage::audit(
+                &state.data_dir,
+                Some(operator_id),
+                "session-revoked-rbac-change",
+                None,
+            );
+        }
+        // Cloud tidak menjawab: biarkan sesi apa adanya dan coba lagi siklus
+        // berikutnya. Mencabut sesi di sini akan mengeluarkan operator lapangan
+        // setiap kali sinyal terputus sesaat.
+        Err(_) => {}
+    }
 }
 
 pub fn status(state: &MobileState) -> Result<MobileSyncStatus, CommandError> {
@@ -1403,7 +2380,12 @@ pub fn status(state: &MobileState) -> Result<MobileSyncStatus, CommandError> {
             "imports": table_count("import_offline"),
             "attendance": table_count("absensi_harian"),
             "scanLogs": table_count("log_scan"),
+            "payrollRuns": table_count("payroll_runs"),
+            "payrollItems": table_count("payroll_items"),
+            "salaryConfigs": table_count("salary_configs"),
         }),
+        push_error: None,
+        changed_rows: 0,
     })
 }
 
@@ -1496,6 +2478,45 @@ pub fn resolve_conflicts(state: &MobileState, event_id: Option<&str>) -> Result<
     transaction.commit().map_err(|_| CommandError::internal())
 }
 
+pub fn resolve_conflicts_local(
+    state: &MobileState,
+    event_id: Option<&str>,
+) -> Result<(), CommandError> {
+    let mut connection = storage::database(&state.data_dir)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|_| CommandError::internal())?;
+    let now = storage::now_epoch_seconds();
+    if let Some(event_id) = event_id {
+        transaction
+            .execute(
+                "DELETE FROM desktop_sync_conflict WHERE event_id = ?;",
+                params![event_id],
+            )
+            .map_err(|_| CommandError::internal())?;
+        transaction
+            .execute(
+                "UPDATE desktop_sync_outbox SET status = 'pending', base_revision = NULL, attempt_count = 0, last_error = NULL, updated_at = ? WHERE event_id = ? AND status = 'conflict';",
+                params![now, event_id],
+            )
+            .map_err(|_| CommandError::internal())?;
+    } else {
+        transaction
+            .execute(
+                "DELETE FROM desktop_sync_conflict;",
+                [],
+            )
+            .map_err(|_| CommandError::internal())?;
+        transaction
+            .execute(
+                "UPDATE desktop_sync_outbox SET status = 'pending', base_revision = NULL, attempt_count = 0, last_error = NULL, updated_at = ? WHERE status = 'conflict';",
+                [now],
+            )
+            .map_err(|_| CommandError::internal())?;
+    }
+    transaction.commit().map_err(|_| CommandError::internal())
+}
+
 pub fn clear_failed(state: &MobileState, event_id: Option<&str>) -> Result<(), CommandError> {
     let connection = storage::database(&state.data_dir)?;
     let now = storage::now_epoch_seconds();
@@ -1519,26 +2540,38 @@ pub fn clear_failed(state: &MobileState, event_id: Option<&str>) -> Result<(), C
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Mutex, RwLock};
 
     use reqwest::Client;
     use serde_json::{json, Value};
     use tempfile::tempdir;
 
     use super::{
-        apply_push_results, apply_snapshot, enqueue, ensure_client_id, pending_events, storage,
-        MobileState,
+        apply_push_results, apply_snapshot, enqueue, ensure_client_id, is_client_schema_outdated,
+        pending_events, storage, MobileState, CLIENT_SCHEMA_VERSION,
     };
+
+    #[test]
+    fn push_ditolak_hanya_saat_skema_cloud_lebih_baru() {
+        // Cloud lebih baru: build ini tidak mengenal kolom barunya, push harus berhenti.
+        assert!(is_client_schema_outdated(CLIENT_SCHEMA_VERSION + 1));
+        // Sama versi: kondisi normal.
+        assert!(!is_client_schema_outdated(CLIENT_SCHEMA_VERSION));
+        // Client lebih baru: jalur migrasi normal lewat ensure_schema, jangan diblokir.
+        assert!(!is_client_schema_outdated(CLIENT_SCHEMA_VERSION - 1));
+        // Cloud kosong / belum bermigrasi.
+        assert!(!is_client_schema_outdated(0));
+    }
 
     fn fixture() -> (tempfile::TempDir, MobileState) {
         let directory = tempdir().expect("temporary directory");
         storage::initialize(directory.path()).expect("local schema");
         let state = MobileState {
-            server_origin: std::sync::RwLock::new("http://localhost:3000".into()),
+            server_origin: RwLock::new("http://localhost:3000".to_string()),
             offline_max_age_hours: 24,
             data_dir: directory.path().to_path_buf(),
             http: Client::new(),
-            turso_config: std::sync::RwLock::new(None),
+            turso_config: RwLock::new(None),
             session: Mutex::new(None),
             vault_lock: Mutex::new(()),
         };
@@ -1692,6 +2725,55 @@ mod tests {
             )
             .expect("server shift name");
         assert_eq!(server_name, "Shift Server");
+    }
+
+    #[test]
+    fn apply_snapshot_self_heals_a_stale_local_schema_missing_a_snapshot_table() {
+        let (_directory, state) = fixture();
+        {
+            let connection = storage::database(&state.data_dir).expect("local database");
+            connection
+                .execute("DROP TABLE id_card_template;", [])
+                .expect("simulate stale schema predating id_card_template");
+        }
+
+        let snapshot = json!({
+            "snapshot": {
+                "revision": 5,
+                "employees": [],
+                "idCards": [],
+                "shifts": [],
+                "settings": [],
+                "idCardTemplates": [{
+                    "id": "default_template",
+                    "name": "Template Kantor",
+                    "orientation": "portrait",
+                    "front_bg_url": "data:image/png;base64,AAAA",
+                    "back_bg_url": null,
+                    "elements_json": "[]",
+                    "is_active": 1,
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "updated_at": "2026-01-01T00:00:00.000Z"
+                }],
+                "backups": [],
+                "corrections": [],
+                "imports": [],
+                "attendance": [],
+                "scanLogs": []
+            }
+        });
+
+        apply_snapshot(&state, &snapshot).expect("snapshot applies after self-healing schema");
+
+        let connection = storage::database(&state.data_dir).expect("local database");
+        let name: String = connection
+            .query_row(
+                "SELECT name FROM id_card_template WHERE id = 'default_template';",
+                [],
+                |row| row.get(0),
+            )
+            .expect("recreated table has the pulled template row");
+        assert_eq!(name, "Template Kantor");
     }
 
     #[test]
@@ -1924,6 +3006,147 @@ mod tests {
         assert_eq!(cards, 2);
         assert_eq!(user_shift, 1);
         assert_eq!(shift_name, "Shift Server");
+    }
+
+    #[test]
+    fn pengaturan_koneksi_perangkat_tidak_pernah_ikut_sinkronisasi() {
+        let (_directory, state) = fixture();
+        let client_id = ensure_client_id(&state).expect("client identity");
+        let mut connection = storage::database(&state.data_dir).expect("local database");
+
+        // Nilai koneksi milik perangkat ini.
+        connection
+            .execute(
+                "INSERT INTO setting_gex_system (key, value) VALUES ('turso_database_url', 'libsql://milik-saya.turso.io');",
+                [],
+            )
+            .expect("local connection setting");
+
+        let transaction = connection.transaction().expect("transaction");
+        // Arah keluar: tidak boleh bisa masuk outbox.
+        let ditolak = enqueue(
+            &transaction,
+            &client_id,
+            "setting",
+            "update",
+            "turso_database_url",
+            &json!({"key": "turso_database_url", "value": "libsql://milik-saya.turso.io"}),
+            None,
+        );
+        assert!(ditolak.is_err(), "kunci koneksi perangkat tidak boleh di-enqueue");
+        // Kunci pengaturan biasa tetap boleh.
+        enqueue(
+            &transaction,
+            &client_id,
+            "setting",
+            "update",
+            "geofence_enabled",
+            &json!({"key": "geofence_enabled", "value": "1"}),
+            None,
+        )
+        .expect("pengaturan operasional tetap disinkronkan");
+        transaction.commit().expect("commit");
+        drop(connection);
+
+        // Arah masuk: nilai dari perangkat lain tidak boleh menimpa milik kita.
+        let snapshot = json!({
+            "snapshot": {
+                "revision": 40,
+                "settings": [
+                    {"key": "turso_database_url", "value": "libsql://punya-perangkat-lain.turso.io"},
+                    {"key": "anti_double_scan_seconds", "value": "30"}
+                ],
+                "employees": [], "idCards": [], "shifts": [], "backups": [],
+                "corrections": [], "imports": [], "attendance": [], "scanLogs": []
+            }
+        });
+        apply_snapshot(&state, &snapshot).expect("snapshot pengaturan");
+
+        let connection = storage::database(&state.data_dir).expect("local database");
+        let url: String = connection
+            .query_row(
+                "SELECT value FROM setting_gex_system WHERE key = 'turso_database_url';",
+                [],
+                |row| row.get(0),
+            )
+            .expect("connection setting");
+        assert_eq!(
+            url, "libsql://milik-saya.turso.io",
+            "URL database perangkat lain tidak boleh menimpa milik perangkat ini"
+        );
+        let scan: String = connection
+            .query_row(
+                "SELECT value FROM setting_gex_system WHERE key = 'anti_double_scan_seconds';",
+                [],
+                |row| row.get(0),
+            )
+            .expect("operational setting");
+        assert_eq!(scan, "30", "pengaturan operasional tetap ikut sinkronisasi");
+    }
+
+    #[test]
+    fn snapshot_kedua_yang_identik_tidak_menulis_ulang_satu_baris_pun() {
+        let (_directory, state) = fixture();
+        let snapshot = json!({
+            "snapshot": {
+                "revision": 30,
+                "employees": [
+                    {
+                        "id_unik": "EMP100", "kode_karyawan": "K100",
+                        "nama": "Pegawai Tetap", "divisi": "Dapur",
+                        "id_shift": 1
+                    }
+                ],
+                "idCards": [], "shifts": [], "settings": [], "backups": [],
+                "corrections": [], "imports": [], "attendance": [], "scanLogs": []
+            }
+        });
+
+        let pertama = apply_snapshot(&state, &snapshot).expect("snapshot pertama");
+        assert_eq!(pertama, 1, "baris baru harus ditulis pada pull pertama");
+
+        // Snapshot yang isinya persis sama tidak boleh menyentuh SQLite lagi.
+        // Inilah yang membuat sync berkala nyaris tanpa biaya tulis.
+        let kedua = apply_snapshot(&state, &snapshot).expect("snapshot kedua");
+        assert_eq!(kedua, 0, "baris identik harus dilewati tanpa penulisan");
+
+        let mut berubah = snapshot.clone();
+        berubah["snapshot"]["revision"] = json!(31);
+        berubah["snapshot"]["employees"][0]["nama"] = json!("Pegawai Berubah");
+        let ketiga = apply_snapshot(&state, &berubah).expect("snapshot berubah");
+        assert_eq!(ketiga, 1, "baris yang berubah harus ditulis ulang");
+
+        let connection = storage::database(&state.data_dir).expect("local database");
+        let nama: String = connection
+            .query_row(
+                "SELECT nama FROM master_data WHERE id_unik = 'EMP100';",
+                [],
+                |row| row.get(0),
+            )
+            .expect("nama karyawan");
+        assert_eq!(nama, "Pegawai Berubah");
+    }
+
+    #[test]
+    fn snapshot_tanpa_kunci_tabel_tidak_menghapus_data_lokal_tabel_itu() {
+        let (_directory, state) = fixture();
+        let penuh = snapshot_with_shifts(json!([{
+            "id_shift": 5, "kode_shift": 5, "nama_shift": "Shift Cloud",
+            "jam_masuk": "07:00", "jam_pulang": "15:00",
+            "jam_kerja_normal_menit": 480, "istirahat_menit": 60
+        }]));
+        apply_snapshot(&state, &penuh).expect("snapshot penuh");
+
+        // Pull inkremental hanya mengirim tabel yang basi. Tabel yang tidak ikut
+        // dikirim WAJIB dibiarkan apa adanya — termasuk yang delete_missing.
+        let inkremental = json!({ "snapshot": { "revision": 13, "employees": [] } });
+        apply_snapshot(&state, &inkremental).expect("snapshot inkremental");
+
+        let connection = storage::database(&state.data_dir).expect("local database");
+        let shifts: i64 = connection
+            .query_row("SELECT COUNT(*) FROM tbl_shift;", [], |row| row.get(0))
+            .expect("shift count");
+        assert_eq!(shifts, 1, "tabel yang tidak dikirim tidak boleh dikosongkan");
     }
 
     #[test]

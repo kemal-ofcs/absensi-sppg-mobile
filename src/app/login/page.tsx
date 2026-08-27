@@ -50,11 +50,25 @@ export default function LoginPage() {
   const isSubmittingRef = useRef(false);
   const [bootstrapStatus, setBootstrapStatus] =
     useState<BootstrapStatus | null>(null);
+  // Dibuka manual ketika kredensial database tersimpan tetapi database cloud-nya
+  // tidak menjawab. Tanpa pintu ini, perangkat yang menunjuk database Turso yang
+  // sudah dihapus terkunci di form login: provisioning tidak pernah muncul lagi
+  // dan tidak ada tempat untuk memasukkan URL database baru.
+  const [showDatabaseSetup, setShowDatabaseSetup] = useState(false);
+  // Status provisioning belum diketahui pada render pertama. Tanpa penanda ini
+  // form login sempat tampil lebih dulu di peluncuran pertama, sehingga instalasi
+  // baru terlihat seperti "langsung masuk ke halaman login" padahal layar
+  // provisioning menyusul sepersekian detik kemudian.
+  const [bootstrapChecked, setBootstrapChecked] = useState(false);
 
   const refreshBootstrapStatus = useCallback(() => {
     void getBootstrapStatus()
-      .then(setBootstrapStatus)
-      .catch(() => setBootstrapStatus(null));
+      .then((status) => {
+        setBootstrapStatus(status);
+        if (status?.reachable) setShowDatabaseSetup(false);
+      })
+      .catch(() => setBootstrapStatus(null))
+      .finally(() => setBootstrapChecked(true));
   }, []);
 
   useEffect(() => {
@@ -167,11 +181,34 @@ export default function LoginPage() {
     }
   };
 
+  if (!isAuthenticated && !bootstrapChecked) {
+    return (
+      <div className="min-h-dvh flex items-center justify-center bg-slate-950">
+        <div className="flex flex-col items-center gap-3">
+          <div className="size-10 rounded-full border-3 border-sky-400 border-t-transparent animate-spin" />
+          <span className="text-xs font-semibold text-slate-400">
+            Memeriksa konfigurasi database...
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   if (!isAuthenticated && bootstrapStatus?.required) {
     return (
       <BootstrapPanel
         status={bootstrapStatus}
         onCompleted={refreshBootstrapStatus}
+      />
+    );
+  }
+
+  if (!isAuthenticated && bootstrapStatus && showDatabaseSetup) {
+    return (
+      <BootstrapPanel
+        status={bootstrapStatus}
+        onCompleted={refreshBootstrapStatus}
+        onCancel={() => setShowDatabaseSetup(false)}
       />
     );
   }
@@ -214,6 +251,32 @@ export default function LoginPage() {
             </button>
           </div>
         </div>
+
+        {/* Database cloud tersimpan tetapi tidak menjawab: tawarkan konfigurasi
+            ulang, jangan biarkan pengguna menebak-nebak di form login. */}
+        {bootstrapStatus?.configured && !bootstrapStatus.reachable ? (
+          <div className="mb-4 w-full rounded-2xl border border-amber-500/30 bg-amber-950/50 p-4 text-xs leading-5 text-amber-100">
+            <p className="font-bold text-amber-300">
+              Database cloud tidak dapat dihubungi
+            </p>
+            <p className="mt-1 text-[11px] text-amber-200/90">
+              {bootstrapStatus.message ??
+                "Perangkat ini masih menunjuk database lama."}
+            </p>
+            <p className="mt-1 text-[11px] text-amber-200/70">
+              Kalau internet aktif dan database sudah diganti/dihapus, arahkan
+              aplikasi ke database yang baru. Login offline tetap bisa dipakai
+              bila perangkat ini pernah login online sebelumnya.
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowDatabaseSetup(true)}
+              className="mt-3 min-h-10 w-full rounded-xl border border-amber-400/40 bg-amber-500/10 px-3 text-xs font-bold text-amber-200 active:scale-[0.98] transition"
+            >
+              Konfigurasi ulang database
+            </button>
+          </div>
+        ) : null}
 
         {/* Login Form Card */}
         <div className="w-full rounded-3xl border border-white/15 bg-slate-900/90 p-6 shadow-2xl backdrop-blur-2xl">

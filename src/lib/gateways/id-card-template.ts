@@ -1,7 +1,6 @@
 "use client";
 
 import { requestWebApi } from "@/lib/client/api-client";
-import { DEFAULT_ID_CARD_ELEMENTS } from "@/lib/client/id-card-renderer";
 import { isDesktopRuntime } from "@/lib/runtime/app-runtime";
 import { invokeDesktop } from "@/lib/runtime/desktop-commands";
 import type { IdCardElement, IdCardTemplateConfig } from "@/types/id-card";
@@ -16,7 +15,7 @@ function normalizeIdCardTemplate(raw: unknown): IdCardTemplateConfig {
       orientation: "landscape",
       frontBgUrl: undefined,
       backBgUrl: undefined,
-      elements: DEFAULT_ID_CARD_ELEMENTS,
+      elements: [],
       isActive: true,
     };
   }
@@ -72,7 +71,7 @@ function normalizeIdCardTemplate(raw: unknown): IdCardTemplateConfig {
     orientation,
     frontBgUrl,
     backBgUrl,
-    elements: elements.length > 0 ? elements : DEFAULT_ID_CARD_ELEMENTS,
+    elements,
     isActive,
   };
 }

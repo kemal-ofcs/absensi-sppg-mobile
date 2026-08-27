@@ -116,3 +116,39 @@ export async function shareDataUrl(
       : "ID Card berhasil disimpan.",
   };
 }
+
+/**
+ * Membagikan teks (ringkasan slip gaji / pesan operasional) via Web Share API atau Clipboard.
+ */
+export async function shareText(
+  text: string,
+  title = "Slip Gaji SPPG",
+): Promise<ShareResult> {
+  if (
+    typeof navigator !== "undefined" &&
+    typeof navigator.share === "function"
+  ) {
+    try {
+      await navigator.share({ title, text });
+      return { sukses: true };
+    } catch (shareErr) {
+      if ((shareErr as Error)?.name === "AbortError") {
+        return { sukses: false, cancelled: true };
+      }
+    }
+  }
+
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return {
+        sukses: true,
+        message: "Teks slip berhasil disalin ke clipboard.",
+      };
+    } catch {
+      // ignore
+    }
+  }
+
+  return { sukses: false, message: "Perangkat tidak mendukung bagikan teks." };
+}

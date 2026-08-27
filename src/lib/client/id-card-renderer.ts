@@ -8,6 +8,10 @@ import type {
   IdCardTemplateConfig,
 } from "@/types/id-card";
 
+// Memory caches to eliminate async lag & re-render latency
+const imageCache = new Map<string, HTMLImageElement>();
+const qrCache = new Map<string, HTMLImageElement>();
+
 export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
   {
     id: "el-company-logo",
@@ -21,7 +25,6 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     height: 20,
     fontSize: 14,
     color: "#ffffff",
-    visible: true,
   },
   {
     id: "el-header-company",
@@ -36,7 +39,6 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     color: "#ffffff",
     textAlign: "left",
     isUppercase: true,
-    visible: true,
   },
   {
     id: "el-header-title",
@@ -52,7 +54,6 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     color: "#38bdf8",
     textAlign: "left",
     isUppercase: true,
-    visible: true,
   },
   {
     id: "el-emp-name",
@@ -67,7 +68,6 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     color: "#ffffff",
     textAlign: "left",
     isUppercase: true,
-    visible: true,
   },
   {
     id: "el-emp-pos",
@@ -81,7 +81,6 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     fontWeight: "600",
     color: "#7dd3fc",
     textAlign: "left",
-    visible: true,
   },
   {
     id: "el-emp-dept",
@@ -92,9 +91,9 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     x: 6,
     y: 67,
     fontSize: 11,
+    fontWeight: "normal",
     color: "#cbd5e1",
     textAlign: "left",
-    visible: true,
   },
   {
     id: "el-emp-nik",
@@ -105,9 +104,9 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     x: 6,
     y: 78,
     fontSize: 10,
+    fontWeight: "normal",
     color: "#94a3b8",
     textAlign: "left",
-    visible: true,
   },
   {
     id: "el-emp-qr",
@@ -121,7 +120,6 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     height: 48,
     fontSize: 10,
     color: "#000000",
-    visible: true,
   },
   {
     id: "el-back-title",
@@ -137,7 +135,6 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     color: "#ffffff",
     textAlign: "left",
     isUppercase: true,
-    visible: true,
   },
   {
     id: "el-back-terms",
@@ -150,9 +147,9 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     width: 84,
     height: 42,
     fontSize: 8.5,
+    fontWeight: "normal",
     color: "#cbd5e1",
     textAlign: "left",
-    visible: true,
   },
   {
     id: "el-back-sig",
@@ -166,7 +163,6 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     height: 18,
     fontSize: 10,
     color: "#ffffff",
-    visible: true,
   },
   {
     id: "el-back-leader",
@@ -181,13 +177,8 @@ export const DEFAULT_ID_CARD_ELEMENTS: IdCardElement[] = [
     fontWeight: "600",
     color: "#94a3b8",
     textAlign: "center",
-    visible: true,
   },
 ];
-
-// Memory caches to eliminate async lag & re-render latency
-const imageCache = new Map<string, HTMLImageElement>();
-const qrCache = new Map<string, HTMLImageElement>();
 
 export function getCachedImage(src: string): HTMLImageElement | null {
   return imageCache.get(src) || null;
@@ -369,11 +360,7 @@ export async function drawIdCardToCanvas(
   }
 
   // 2. Filter elements for this side (only if visible !== false)
-  const rawElements =
-    Array.isArray(template.elements) && template.elements.length > 0
-      ? template.elements
-      : DEFAULT_ID_CARD_ELEMENTS;
-  const elements = rawElements.filter(
+  const elements = (template.elements || []).filter(
     (el) => el.side === side && el.visible !== false,
   );
 
@@ -684,4 +671,288 @@ async function renderSingleElement(
   }
 
   ctx.restore();
+}
+
+export interface PrintOptions {
+  layout?: "cr80" | "a4_sheet";
+  mode?: "front_only" | "back_only" | "duplex";
+  orientation?: "landscape" | "portrait";
+  title?: string;
+}
+
+export function printCardsDirectly(
+  cards: { frontPng: string; backPng?: string; name: string }[],
+  options?: PrintOptions,
+) {
+  const layout = options?.layout || "cr80";
+  const mode = options?.mode || "front_only";
+  const isPortrait = options?.orientation === "portrait";
+
+  const existing = document.getElementById("sppg-print-root");
+  if (existing) existing.remove();
+
+  const printRoot = document.createElement("div");
+  printRoot.id = "sppg-print-root";
+
+  if (layout === "cr80") {
+    const cardW = isPortrait ? "54mm" : "85.6mm";
+    const cardH = isPortrait ? "85.6mm" : "54mm";
+
+    printRoot.innerHTML = `
+      <style>
+        @page {
+          size: ${cardW} ${cardH};
+          margin: 0;
+        }
+        @media print {
+          html, body {
+            margin: 0 !important;
+            padding: 0 !important;
+            background: white !important;
+            width: ${cardW} !important;
+            height: ${cardH} !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+          body > *:not(#sppg-print-root) {
+            display: none !important;
+          }
+          #sppg-print-root {
+            display: block !important;
+            margin: 0 !important;
+            padding: 0 !important;
+          }
+          .cr80-card-page {
+            width: ${cardW};
+            height: ${cardH};
+            page-break-after: always;
+            box-sizing: border-box;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          }
+          .cr80-card-page:last-child {
+            page-break-after: auto;
+          }
+          .cr80-card-page img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+          }
+        }
+        #sppg-print-root {
+          display: none;
+        }
+      </style>
+      <div class="cr80-container">
+        ${cards
+          .map((c) => {
+            let html = "";
+            if (mode === "front_only" || mode === "duplex") {
+              html += `<div class="cr80-card-page"><img src="${c.frontPng}" alt="${c.name} Front" /></div>`;
+            }
+            if ((mode === "back_only" || mode === "duplex") && c.backPng) {
+              html += `<div class="cr80-card-page"><img src="${c.backPng}" alt="${c.name} Back" /></div>`;
+            }
+            return html;
+          })
+          .join("")}
+      </div>
+    `;
+  } else {
+    const cardW = isPortrait ? "54mm" : "85.6mm";
+    const cardH = isPortrait ? "85.6mm" : "54mm";
+    const gridCols = isPortrait ? "repeat(3, 54mm)" : "repeat(2, 85.6mm)";
+
+    let pagesHtml = "";
+    if (mode === "front_only") {
+      pagesHtml = `
+        <div class="a4-page">
+          <div class="card-grid">
+            ${cards
+              .map(
+                (c) => `
+              <div class="card-wrapper">
+                <div class="crop-mark top-left"></div>
+                <div class="crop-mark top-right"></div>
+                <div class="crop-mark bottom-left"></div>
+                <div class="crop-mark bottom-right"></div>
+                <img src="${c.frontPng}" alt="${c.name}" class="card-img" />
+              </div>
+            `,
+              )
+              .join("")}
+          </div>
+        </div>
+      `;
+    } else if (mode === "back_only") {
+      pagesHtml = `
+        <div class="a4-page">
+          <div class="card-grid">
+            ${cards
+              .map(
+                (c) => `
+              <div class="card-wrapper">
+                <div class="crop-mark top-left"></div>
+                <div class="crop-mark top-right"></div>
+                <div class="crop-mark bottom-left"></div>
+                <div class="crop-mark bottom-right"></div>
+                <img src="${c.backPng || c.frontPng}" alt="${c.name}" class="card-img" />
+              </div>
+            `,
+              )
+              .join("")}
+          </div>
+        </div>
+      `;
+    } else {
+      pagesHtml = `
+        <div class="a4-page page-front">
+          <div class="card-grid">
+            ${cards
+              .map(
+                (c) => `
+              <div class="card-wrapper">
+                <div class="crop-mark top-left"></div>
+                <div class="crop-mark top-right"></div>
+                <div class="crop-mark bottom-left"></div>
+                <div class="crop-mark bottom-right"></div>
+                <img src="${c.frontPng}" alt="${c.name}" class="card-img" />
+              </div>
+            `,
+              )
+              .join("")}
+          </div>
+        </div>
+        <div class="a4-page page-back">
+          <div class="card-grid">
+            ${cards
+              .map(
+                (c) => `
+              <div class="card-wrapper">
+                <div class="crop-mark top-left"></div>
+                <div class="crop-mark top-right"></div>
+                <div class="crop-mark bottom-left"></div>
+                <div class="crop-mark bottom-right"></div>
+                <img src="${c.backPng || c.frontPng}" alt="${c.name}" class="card-img" />
+              </div>
+            `,
+              )
+              .join("")}
+          </div>
+        </div>
+      `;
+    }
+
+    printRoot.innerHTML = `
+      <style>
+        @page {
+          size: A4 portrait;
+          margin: 8mm;
+        }
+        @media print {
+          html, body {
+            margin: 0 !important;
+            padding: 0 !important;
+            background: white !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+          body > *:not(#sppg-print-root) {
+            display: none !important;
+          }
+          #sppg-print-root {
+            display: block !important;
+          }
+          .a4-page {
+            width: 194mm;
+            min-height: 275mm;
+            margin: 0 auto;
+            page-break-after: always;
+            box-sizing: border-box;
+            padding: 4mm 0;
+          }
+          .a4-page:last-child {
+            page-break-after: auto;
+          }
+          .card-grid {
+            display: grid;
+            grid-template-columns: ${gridCols};
+            gap: 6mm 6mm;
+            justify-content: center;
+          }
+          .card-wrapper {
+            position: relative;
+            width: ${cardW};
+            height: ${cardH};
+            box-sizing: border-box;
+          }
+          .card-img {
+            width: ${cardW};
+            height: ${cardH};
+            object-fit: cover;
+            display: block;
+            border-radius: 1.5mm;
+          }
+          .crop-mark {
+            position: absolute;
+            width: 3.5mm;
+            height: 3.5mm;
+            border-color: #64748b;
+            border-style: solid;
+            pointer-events: none;
+          }
+          .top-left { top: -1.8mm; left: -1.8mm; border-width: 1px 0 0 1px; }
+          .top-right { top: -1.8mm; right: -1.8mm; border-width: 1px 1px 0 0; }
+          .bottom-left { bottom: -1.8mm; left: -1.8mm; border-width: 0 0 1px 1px; }
+          .bottom-right { bottom: -1.8mm; right: -1.8mm; border-width: 0 1px 1px 0; }
+        }
+        #sppg-print-root {
+          display: none;
+        }
+      </style>
+      <div class="a4-container">
+        ${pagesHtml}
+      </div>
+    `;
+  }
+
+  document.body.appendChild(printRoot);
+
+  setTimeout(() => {
+    window.focus();
+    window.print();
+    setTimeout(() => {
+      printRoot.remove();
+    }, 3000);
+  }, 250);
+}
+
+export function printSingleCard(
+  frontPng: string,
+  title = "ID Card",
+  backPng?: string,
+  orientation: "landscape" | "portrait" = "landscape",
+) {
+  printCardsDirectly([{ frontPng, backPng, name: title }], {
+    layout: "cr80",
+    mode: backPng ? "duplex" : "front_only",
+    orientation,
+    title,
+  });
+}
+
+export function printA4GridSheet(
+  cards: { frontPng: string; backPng?: string; name: string }[],
+  mode: "front_only" | "back_only" | "duplex" = "front_only",
+  orientation: "landscape" | "portrait" = "landscape",
+) {
+  printCardsDirectly(cards, {
+    layout: "a4_sheet",
+    mode,
+    orientation,
+    title: "Cetak Lembar ID Card A4",
+  });
 }

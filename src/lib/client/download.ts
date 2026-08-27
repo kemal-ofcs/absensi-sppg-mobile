@@ -115,31 +115,6 @@ export async function downloadDataUrl(
       ? dataUrl.split(",")[1] || ""
       : dataUrl;
 
-  // 1. Android Native Bridge (MediaStore & System Notification)
-  if (typeof window !== "undefined" && window.AndroidBridge?.saveImage) {
-    try {
-      const rawRes = window.AndroidBridge.saveImage(cleanBase64, filename);
-      const res = JSON.parse(rawRes) as {
-        sukses: boolean;
-        path?: string;
-        filename?: string;
-        error?: string;
-      };
-      if (res.sukses) {
-        return {
-          sukses: true,
-          path: res.path || "Pictures/SPPG",
-          filename: res.filename || filename,
-        };
-      }
-      if (res.error) {
-        throw new Error(res.error);
-      }
-    } catch (bridgeErr) {
-      console.warn("AndroidBridge saveImage failed, falling back:", bridgeErr);
-    }
-  }
-
   if (isDesktopRuntime()) {
     try {
       const res = await invokeDesktop<{
@@ -158,11 +133,11 @@ export async function downloadDataUrl(
         };
       }
     } catch (err) {
-      console.warn("Desktop/Mobile native save failed:", err);
+      console.warn("Desktop native save failed:", err);
       throw new Error(
         err instanceof Error
           ? err.message
-          : "Gagal menyimpan berkas ke media penyimpanan perangkat.",
+          : "Gagal menyimpan berkas ke media penyimpanan komputer.",
       );
     }
   }

@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use super::models::{CommandError, OfflineCredential};
+use super::payroll_seed;
 
 const DATABASE_NAME: &str = "mobile-security.db";
 
@@ -78,6 +79,45 @@ fn ensure_column(
         connection
             .execute(alter_sql, [])
             .map_err(|_| format!("Kolom {table}.{column} tidak dapat dimigrasikan."))?;
+    }
+    Ok(())
+}
+
+/// Menanam tarif default payroll dan membersihkan sisa seed versi lama.
+///
+/// Seed lokal dan seed cloud dulu ditulis terpisah dengan id, kode komponen,
+/// dan tarif yang berbeda. Baris lokal ikut terdorong ke cloud lewat backfill
+/// outbox sehingga bracket PASAL_17 menjadi dobel, sementara push BPJS selalu
+/// gagal karena `component_code` UNIQUE sudah dipakai baris cloud ber-id lain.
+/// Sekarang keduanya membaca `payroll_seed`, dan baris lama dihapus sekali.
+fn seed_payroll_rate_tables(connection: &Connection) -> Result<(), String> {
+    let legacy_ids = payroll_seed::LEGACY_RATE_IDS
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    connection
+        .execute_batch(&format!(
+            r#"
+      DELETE FROM tax_rules WHERE id IN ({legacy_ids});
+      DELETE FROM bpjs_rules WHERE id IN ({legacy_ids});
+      DELETE FROM overtime_tier_rules WHERE id IN ({legacy_ids});
+      DELETE FROM desktop_entity_revision
+        WHERE domain = 'payroll' AND entity_key IN ({legacy_ids});
+      DELETE FROM desktop_sync_outbox
+        WHERE domain = 'payroll' AND entity_key IN ({legacy_ids});
+      "#
+        ))
+        .map_err(|_| "Seed tarif payroll lama tidak dapat dibersihkan.".to_owned())?;
+
+    for statement in [
+        payroll_seed::OVERTIME_TIER_RULES_SEED_SQL,
+        payroll_seed::TAX_RULES_SEED_SQL,
+        payroll_seed::BPJS_RULES_SEED_SQL,
+    ] {
+        connection
+            .execute_batch(statement)
+            .map_err(|_| "Tarif default payroll tidak dapat disiapkan.".to_owned())?;
     }
     Ok(())
 }
@@ -311,6 +351,13 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         last_revision INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL
       );
+      -- Nilai `sync_pulse` cloud per tabel yang terakhir berhasil diterapkan.
+      -- Dipakai pull inkremental untuk hanya menarik tabel yang benar-benar basi.
+      CREATE TABLE IF NOT EXISTS desktop_sync_table_cursor (
+        table_name TEXT PRIMARY KEY,
+        remote_revision INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS desktop_sync_conflict (
         event_id TEXT PRIMARY KEY,
         domain TEXT NOT NULL,
@@ -362,17 +409,123 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         ON master_data(id_shift, status_aktif);
       CREATE INDEX IF NOT EXISTS idx_local_outbox_status_retry
         ON desktop_sync_outbox(status, next_retry_at, created_at);
+      CREATE INDEX IF NOT EXISTS idx_local_outbox_domain_entity
+        ON desktop_sync_outbox(domain, entity_key, status);
       CREATE INDEX IF NOT EXISTS idx_local_import_status
         ON import_offline(status_proses, timestamp_input);
+      CREATE TABLE IF NOT EXISTS salary_configs (
+        id TEXT PRIMARY KEY,
+        id_karyawan TEXT NOT NULL,
+        rate_per_hour INTEGER NOT NULL CHECK (rate_per_hour >= 0),
+        ptkp_status TEXT NOT NULL DEFAULT 'TK/0'
+          CHECK (ptkp_status IN ('TK/0','TK/1','TK/2','TK/3','K/0','K/1','K/2','K/3')),
+        effective_date TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(id_karyawan, effective_date)
+      );
+      CREATE TABLE IF NOT EXISTS overtime_tier_rules (
+        id TEXT PRIMARY KEY,
+        rule_type TEXT NOT NULL CHECK (rule_type IN ('HARI_KERJA', 'HARI_LIBUR')),
+        tier_order INTEGER NOT NULL,
+        hour_start REAL NOT NULL CHECK (hour_start >= 0),
+        hour_end REAL,
+        multiplier REAL NOT NULL CHECK (multiplier >= 1.0),
+        is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+        UNIQUE(rule_type, tier_order)
+      );
+      CREATE TABLE IF NOT EXISTS payroll_components (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL CHECK (category IN ('ALLOWANCE', 'DEDUCTION')),
+        calc_type TEXT NOT NULL CHECK (calc_type IN ('FIXED', 'PERCENTAGE')),
+        default_value REAL NOT NULL DEFAULT 0 CHECK (default_value >= 0),
+        applies_to TEXT NOT NULL DEFAULT 'ALL',
+        is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
+      );
+      CREATE TABLE IF NOT EXISTS tax_rules (
+        id TEXT PRIMARY KEY,
+        category TEXT NOT NULL CHECK (category IN ('TER_A','TER_B','TER_C','PASAL_17')),
+        bracket_min INTEGER NOT NULL,
+        bracket_max INTEGER,
+        rate_percentage REAL NOT NULL CHECK (rate_percentage >= 0),
+        effective_date TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS bpjs_rules (
+        id TEXT PRIMARY KEY,
+        component_code TEXT NOT NULL UNIQUE,
+        component_name TEXT NOT NULL,
+        rate_percentage REAL NOT NULL CHECK (rate_percentage >= 0),
+        wage_cap INTEGER,
+        effective_date TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS payroll_runs (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        period_start TEXT NOT NULL,
+        period_end TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'DRAFT'
+          CHECK (status IN ('DRAFT','SUBMITTED','REVIEWED','APPROVED','PAID','REJECTED')),
+        total_gross_payout INTEGER NOT NULL DEFAULT 0,
+        total_net_payout INTEGER NOT NULL DEFAULT 0,
+        total_employees INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS payroll_items (
+        id TEXT PRIMARY KEY,
+        payroll_run_id TEXT NOT NULL REFERENCES payroll_runs(id) ON DELETE CASCADE,
+        id_karyawan TEXT NOT NULL,
+        nama_karyawan TEXT NOT NULL,
+        divisi TEXT NOT NULL,
+        ptkp_status TEXT NOT NULL DEFAULT 'TK/0',
+        total_regular_hours REAL NOT NULL,
+        total_overtime_hours REAL NOT NULL,
+        total_overtime_index REAL NOT NULL,
+        rate_per_hour INTEGER NOT NULL,
+        basic_salary INTEGER NOT NULL CHECK (basic_salary >= 0),
+        overtime_salary INTEGER NOT NULL CHECK (overtime_salary >= 0),
+        gross_salary INTEGER NOT NULL CHECK (gross_salary >= 0),
+        total_allowances INTEGER NOT NULL DEFAULT 0,
+        total_deductions INTEGER NOT NULL DEFAULT 0,
+        bpjs_employee_total INTEGER NOT NULL DEFAULT 0,
+        bpjs_company_total INTEGER NOT NULL DEFAULT 0,
+        pph21_amount INTEGER NOT NULL DEFAULT 0,
+        net_salary INTEGER NOT NULL CHECK (net_salary >= 0),
+        breakdown_snapshot TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (payroll_run_id, id_karyawan)
+      );
+      CREATE TABLE IF NOT EXISTS payroll_audit_logs (
+        id TEXT PRIMARY KEY,
+        payroll_run_id TEXT NOT NULL REFERENCES payroll_runs(id) ON DELETE CASCADE,
+        action TEXT NOT NULL,
+        old_status TEXT,
+        new_status TEXT NOT NULL,
+        performed_by TEXT NOT NULL,
+        notes TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_payroll_items_run ON payroll_items(payroll_run_id);
+      CREATE INDEX IF NOT EXISTS idx_local_payroll_items_karyawan ON payroll_items(id_karyawan);
+      CREATE INDEX IF NOT EXISTS idx_local_payroll_runs_status ON payroll_runs(status, period_start);
+      CREATE INDEX IF NOT EXISTS idx_local_salary_configs_karyawan ON salary_configs(id_karyawan, effective_date DESC);
+      -- Tarif default payroll di-seed terpisah dari `super::payroll_seed`, satu
+      -- sumber bersama dengan seed cloud di `turso.rs`. Jangan tulis ulang di sini.
       INSERT OR IGNORE INTO desktop_schema_migration (version, name, applied_at)
       VALUES (1, 'mobile-security-foundation', unixepoch());
       INSERT OR IGNORE INTO desktop_schema_migration (version, name, applied_at)
       VALUES (2, 'mobile-operational-sync-foundation', unixepoch());
       INSERT OR IGNORE INTO desktop_schema_migration (version, name, applied_at)
       VALUES (3, 'mobile-offline-import-foundation', unixepoch());
+      INSERT OR IGNORE INTO desktop_schema_migration (version, name, applied_at)
+      VALUES (4, 'mobile-payroll-foundation', unixepoch());
       "#,
         )
         .map_err(|_| "Schema keamanan Mobile tidak dapat diinisialisasi.".to_owned())?;
+
+    seed_payroll_rate_tables(&connection)?;
 
     ensure_column(
         &connection,
@@ -518,6 +671,138 @@ pub fn initialize(path: &Path) -> Result<(), String> {
             "#,
         )
         .map_err(|_| "Domain sinkronisasi log scan lokal tidak dapat dinormalisasi.".to_owned())?;
+
+    Ok(())
+}
+
+/// Tabel operasional lokal yang isinya 100% milik satu database cloud.
+///
+/// Semuanya adalah cache dari Turso: tidak ada satu pun baris di sini yang
+/// bermakna tanpa database asalnya. Ketika perangkat dipindahkan ke database
+/// Turso lain, isi tabel-tabel inilah yang harus hilang.
+const CLOUD_MIRRORED_TABLES: &[&str] = &[
+    "absensi_harian",
+    "log_scan",
+    "koreksi_admin",
+    "import_offline",
+    "audit_absensi",
+    "backup_karyawan",
+    "id_card",
+    "id_card_template",
+    "master_data",
+    "tbl_shift",
+    "tbl_hari_libur",
+    "company_profile",
+    "payroll_audit_logs",
+    "payroll_items",
+    "payroll_runs",
+    "payroll_components",
+    "salary_configs",
+    "overtime_tier_rules",
+    "tax_rules",
+    "bpjs_rules",
+];
+
+/// Membuang seluruh jejak database cloud lama ketika perangkat dipindahkan ke
+/// database Turso yang berbeda.
+///
+/// Tanpa ini, memindah aplikasi ke database baru hanya mengganti kredensial:
+/// karyawan, absensi, log scan, dan payroll dari database lama tetap tersimpan
+/// di SQLite lokal, tetap tampil di layar, dan outbox lama tetap terdorong ke
+/// database baru. Snapshot pull tidak bisa membereskannya karena `delete_missing`
+/// sengaja dimatikan untuk hampir semua tabel — cloud kosong memang tidak boleh
+/// menghapus data lokal yang belum pernah dilacak server. Jadi pembersihan wajib
+/// dilakukan tepat di titik perpindahan database.
+///
+/// Yang sengaja DIPERTAHANKAN: `desktop_schema_migration`, `desktop_device_identity`,
+/// dan `desktop_client_identity` (identitas perangkat dipakai untuk membuka vault
+/// kredensial yang baru saja ditulis), serta setting koneksi milik perangkat ini
+/// (`device_local_setting_keys`) yang justru menentukan database tujuan baru.
+pub fn reset_cloud_linked_data(
+    path: &Path,
+    device_local_setting_keys: &[&str],
+) -> Result<(), CommandError> {
+    let mut connection = database(path)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|_| CommandError::internal())?;
+
+    // Foreign key antar tabel cache tidak relevan saat seluruh cache dibuang.
+    transaction
+        .execute_batch("PRAGMA defer_foreign_keys = ON;")
+        .map_err(|_| CommandError::internal())?;
+
+    for table in CLOUD_MIRRORED_TABLES {
+        transaction
+            .execute(&format!("DELETE FROM {table};"), [])
+            .map_err(|_| {
+                CommandError::new(
+                    "LOCAL_RESET_FAILED",
+                    "Data lokal database lama tidak dapat dibersihkan.",
+                )
+            })?;
+    }
+
+    // Setting operasional ikut dibuang, kecuali kunci koneksi perangkat ini.
+    let placeholders = vec!["?"; device_local_setting_keys.len()].join(", ");
+    transaction
+        .execute(
+            &format!("DELETE FROM setting_gex_system WHERE key NOT IN ({placeholders});"),
+            rusqlite::params_from_iter(device_local_setting_keys.iter()),
+        )
+        .map_err(|_| {
+            CommandError::new(
+                "LOCAL_RESET_FAILED",
+                "Pengaturan lokal database lama tidak dapat dibersihkan.",
+            )
+        })?;
+
+    // Seluruh state sinkronisasi milik database lama: outbox yang belum terkirim
+    // ke database lama TIDAK boleh dikirim ke database baru.
+    transaction
+        .execute_batch(
+            r#"
+            DELETE FROM desktop_sync_outbox;
+            DELETE FROM desktop_sync_conflict;
+            DELETE FROM desktop_entity_revision;
+            DELETE FROM desktop_sync_cursor;
+            DELETE FROM desktop_sync_table_cursor;
+            DELETE FROM desktop_credential_alias;
+            DELETE FROM desktop_credential_index;
+            DELETE FROM desktop_login_rate_limit;
+            "#,
+        )
+        .map_err(|_| {
+            CommandError::new(
+                "LOCAL_RESET_FAILED",
+                "Status sinkronisasi database lama tidak dapat dibersihkan.",
+            )
+        })?;
+
+    // Tarif default payroll bukan data cloud, melainkan seed bawaan aplikasi.
+    // Tabelnya baru saja dikosongkan, jadi tanam ulang di transaksi yang sama.
+    seed_payroll_rate_tables(&transaction).map_err(|message| {
+        CommandError::new("LOCAL_RESET_FAILED", message)
+    })?;
+
+    transaction.commit().map_err(|_| CommandError::internal())?;
+
+    // Snapshot login offline terikat ke origin database lama, jadi sudah tidak
+    // pernah bisa dipakai lagi. Buang berkasnya supaya kredensial operator
+    // database lama tidak tertinggal di perangkat. Vault koneksi Turso
+    // (`turso_config.*`) justru baru saja ditulis untuk database baru — jangan
+    // disentuh.
+    let credentials_dir = path.join("credentials");
+    if let Ok(entries) = std::fs::read_dir(&credentials_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("turso_config.") {
+                continue;
+            }
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 
     Ok(())
 }
@@ -709,9 +994,10 @@ pub fn clear_login_failures(path: &Path, identifier: &str) -> Result<(), Command
 mod tests {
     use tempfile::tempdir;
 
+    use super::payroll_seed;
     use super::{
         clear_login_failures, database, get_or_create_device_id, initialize, login_lock_remaining,
-        record_failed_login,
+        record_failed_login, reset_cloud_linked_data, set_system_setting,
     };
 
     #[test]
@@ -749,7 +1035,91 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("migration count");
-        assert_eq!(migrations, 3);
+        assert_eq!(migrations, 4);
+    }
+
+    /// Pindah database cloud harus membuang seluruh cache database lama, tetapi
+    /// tidak boleh menyentuh identitas perangkat, kunci koneksi perangkat, atau
+    /// seed tarif payroll bawaan aplikasi.
+    #[test]
+    fn switching_cloud_database_purges_old_local_data() {
+        let directory = tempdir().expect("temporary directory");
+        initialize(directory.path()).expect("initialize schema");
+        let device_id = get_or_create_device_id(directory.path()).expect("device id");
+
+        let connection = database(directory.path()).expect("database connection");
+        connection
+            .execute(
+                "INSERT INTO master_data (id_unik, kode_karyawan, nama, divisi, id_shift) VALUES ('E1', 'K1', 'Karyawan Lama', 'Dapur', 1);",
+                [],
+            )
+            .expect("seed employee");
+        connection
+            .execute(
+                "INSERT INTO desktop_sync_outbox (event_id, client_id, domain, operation, entity_key, payload_json, status, created_at, updated_at) VALUES ('EV1', 'C1', 'employee', 'update', 'E1', '{}', 'pending', 0, 0);",
+                [],
+            )
+            .expect("seed outbox");
+        drop(connection);
+
+        set_system_setting(directory.path(), "geofence_radius", "250").expect("seed setting");
+        set_system_setting(
+            directory.path(),
+            "turso_database_url",
+            "libsql://lama.turso.io",
+        )
+        .expect("seed device-local setting");
+
+        let credentials = directory.path().join("credentials");
+        std::fs::create_dir_all(&credentials).expect("credentials directory");
+        std::fs::write(credentials.join("operator-lama.vault"), b"x").expect("write snapshot");
+        std::fs::write(credentials.join("turso_config.vault"), b"y").expect("write vault");
+
+        reset_cloud_linked_data(directory.path(), &["turso_database_url", "turso_auth_token"])
+            .expect("reset local workspace");
+
+        let connection = database(directory.path()).expect("database connection");
+        for table in ["master_data", "desktop_sync_outbox", "desktop_entity_revision"] {
+            let total: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table};"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count rows");
+            assert_eq!(total, 0, "{table} masih menyimpan data database lama");
+        }
+
+        let leftover_settings: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM setting_gex_system WHERE key = 'geofence_radius';",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count settings");
+        assert_eq!(leftover_settings, 0, "setting database lama harus terbuang");
+
+        let kept_url: String = connection
+            .query_row(
+                "SELECT value FROM setting_gex_system WHERE key = 'turso_database_url';",
+                [],
+                |row| row.get(0),
+            )
+            .expect("device-local setting harus dipertahankan");
+        assert_eq!(kept_url, "libsql://lama.turso.io");
+
+        // Tarif default payroll ditanam ulang, bukan ikut terbuang.
+        let tax_rules: i64 = connection
+            .query_row("SELECT COUNT(*) FROM tax_rules;", [], |row| row.get(0))
+            .expect("count tax rules");
+        assert!(tax_rules > 0, "seed tarif pajak harus ditanam ulang");
+        drop(connection);
+
+        // Identitas perangkat dipakai membuka vault koneksi yang baru ditulis.
+        assert_eq!(
+            get_or_create_device_id(directory.path()).expect("device id"),
+            device_id
+        );
+        assert!(!credentials.join("operator-lama.vault").is_file());
+        assert!(credentials.join("turso_config.vault").is_file());
     }
 
     #[test]
@@ -784,5 +1154,74 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.starts_with("device-"));
         assert_eq!(first.len(), 71);
+    }
+    #[test]
+    fn tarif_default_lokal_memakai_id_yang_sama_dengan_cloud() {
+        let directory = tempdir().expect("temporary directory");
+        initialize(directory.path()).expect("local schema");
+        let connection = database(directory.path()).expect("local database");
+
+        // Id seed lokal harus identik dengan seed cloud. Dulu lokal memakai
+        // `tax-p17-1` sementara cloud `tax_p17_1`, sehingga baris lokal ikut
+        // terdorong ke cloud dan bracket PASAL_17 menjadi dobel.
+        for table in ["tax_rules", "bpjs_rules", "overtime_tier_rules"] {
+            let mut statement = connection
+                .prepare(&format!("SELECT id FROM {table};"))
+                .expect("rate query");
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("rate rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("rate ids");
+            assert!(!ids.is_empty(), "{table} harus punya tarif default");
+            for id in &ids {
+                assert!(
+                    payroll_seed::DEFAULT_RATE_IDS.contains(&id.as_str()),
+                    "{table} memuat id tak terdaftar di payroll_seed: {id}"
+                );
+                assert!(
+                    !payroll_seed::LEGACY_RATE_IDS.contains(&id.as_str()),
+                    "{table} masih memuat id seed lama: {id}"
+                );
+            }
+        }
+
+        // PPh 21 butuh Pasal 17 dan TER; lokal dulu hanya punya Pasal 17.
+        for category in ["PASAL_17", "TER_A", "TER_B", "TER_C"] {
+            let total: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM tax_rules WHERE category = ?;",
+                    [category],
+                    |row| row.get(0),
+                )
+                .expect("tax category count");
+            assert!(total > 0, "kategori tarif {category} tidak ter-seed di lokal");
+        }
+    }
+
+    #[test]
+    fn seed_tarif_lama_dibersihkan_saat_inisialisasi_ulang() {
+        let directory = tempdir().expect("temporary directory");
+        initialize(directory.path()).expect("local schema");
+        let connection = database(directory.path()).expect("local database");
+        connection
+            .execute(
+                "INSERT INTO tax_rules (id, category, bracket_min, bracket_max, rate_percentage, effective_date)
+                 VALUES ('tax-p17-1', 'PASAL_17', 0, 60000000, 5.0, '2024-01-01');",
+                [],
+            )
+            .expect("legacy row");
+        drop(connection);
+
+        initialize(directory.path()).expect("re-initialize");
+        let connection = database(directory.path()).expect("local database");
+        let leftover: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM tax_rules WHERE id = 'tax-p17-1';",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy count");
+        assert_eq!(leftover, 0, "baris seed lama harus dibersihkan");
     }
 }

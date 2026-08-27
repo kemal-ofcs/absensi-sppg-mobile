@@ -13,11 +13,21 @@ export async function readOperationalSnapshot(client: Client) {
     shifts,
     holidays,
     settings,
+    companyProfiles,
+    idCardTemplates,
     backups,
     corrections,
     imports,
     attendance,
     scanLogs,
+    salaryConfigs,
+    overtimeTierRules,
+    payrollComponents,
+    taxRules,
+    bpjsRules,
+    payrollRuns,
+    payrollItems,
+    payrollAuditLogs,
     revision,
   ] = await client.batch(
     [
@@ -32,6 +42,8 @@ export async function readOperationalSnapshot(client: Client) {
       "SELECT * FROM tbl_shift ORDER BY kode_shift;",
       "SELECT * FROM tbl_hari_libur ORDER BY tanggal ASC;",
       "SELECT key, value FROM setting_gex_system;",
+      "SELECT * FROM company_profile;",
+      "SELECT * FROM id_card_template ORDER BY created_at ASC;",
       `
       SELECT * FROM backup_karyawan
       WHERE status_tugas = 'Aktif'
@@ -55,6 +67,14 @@ export async function readOperationalSnapshot(client: Client) {
       ORDER BY id_log DESC
       LIMIT 5000;
     `,
+      "SELECT * FROM salary_configs ORDER BY id_karyawan, effective_date DESC;",
+      "SELECT * FROM overtime_tier_rules ORDER BY rule_type, tier_order;",
+      "SELECT * FROM payroll_components ORDER BY category, name;",
+      "SELECT * FROM tax_rules ORDER BY category, bracket_min;",
+      "SELECT * FROM bpjs_rules ORDER BY component_code;",
+      "SELECT * FROM payroll_runs ORDER BY period_start DESC, created_at DESC;",
+      "SELECT * FROM payroll_items ORDER BY created_at;",
+      "SELECT * FROM payroll_audit_logs ORDER BY created_at;",
       "SELECT COALESCE(MAX(revision), 0) AS revision FROM sync_change_log;",
     ],
     "read",
@@ -68,10 +88,20 @@ export async function readOperationalSnapshot(client: Client) {
     shifts: plainRows(shifts.rows),
     holidays: plainRows(holidays.rows),
     settings: plainRows(settings.rows),
+    companyProfiles: plainRows(companyProfiles.rows),
+    idCardTemplates: plainRows(idCardTemplates.rows),
     backups: plainRows(backups.rows),
     corrections: plainRows(corrections.rows),
     imports: plainRows(imports.rows),
     attendance: plainRows(attendance.rows),
     scanLogs: plainRows(scanLogs.rows),
+    salaryConfigs: plainRows(salaryConfigs.rows),
+    overtimeTierRules: plainRows(overtimeTierRules.rows),
+    payrollComponents: plainRows(payrollComponents.rows),
+    taxRules: plainRows(taxRules.rows),
+    bpjsRules: plainRows(bpjsRules.rows),
+    payrollRuns: plainRows(payrollRuns.rows),
+    payrollItems: plainRows(payrollItems.rows),
+    payrollAuditLogs: plainRows(payrollAuditLogs.rows),
   };
 }

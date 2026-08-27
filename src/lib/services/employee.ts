@@ -229,10 +229,11 @@ export async function tambahKaryawan(data: KaryawanInput) {
   // 2. Insert record ke id_card
   await db.execute({
     sql: `
-      INSERT OR IGNORE INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate)
-      VALUES (?, ?, ?, 'Belum', ?);
+      INSERT INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate)
+      SELECT ?, ?, ?, 'Belum', ?
+      WHERE NOT EXISTS (SELECT 1 FROM id_card WHERE id_unik = ?);
     `,
-    args: [data.id_unik, data.nama, data.divisi, today],
+    args: [data.id_unik, data.nama, data.divisi, today, data.id_unik],
   });
 
   return { sukses: true, id_unik: data.id_unik, token_absensi: tokenAbsensi };
@@ -282,6 +283,18 @@ export async function updateKaryawan(
   if (data.catatan !== undefined) {
     updates.push("catatan = ?");
     args.push(data.catatan);
+  }
+  if (data.jenis_personil !== undefined) {
+    updates.push("jenis_personil = ?");
+    args.push(data.jenis_personil);
+  }
+  if (data.tanggal_mulai_aktif !== undefined) {
+    updates.push("tanggal_mulai_aktif = ?");
+    args.push(data.tanggal_mulai_aktif);
+  }
+  if (data.tanggal_selesai_aktif !== undefined) {
+    updates.push("tanggal_selesai_aktif = ?");
+    args.push(data.tanggal_selesai_aktif);
   }
 
   if (updates.length > 0) {

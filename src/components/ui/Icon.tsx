@@ -2,19 +2,25 @@ import type { ReactNode, SVGProps } from "react";
 
 export type IconName =
   | "alert"
+  | "arrow-left"
+  | "arrow-right"
   | "calendar"
   | "check"
   | "chevron-right"
   | "clock"
   | "dashboard"
   | "database"
+  | "document"
   | "download"
+  | "history"
   | "home"
   | "id-card"
   | "logout"
   | "lock"
   | "palette"
   | "phone"
+  | "plus"
+  | "refresh"
   | "reset"
   | "scanner"
   | "settings"
@@ -25,8 +31,10 @@ export type IconName =
   | "upload"
   | "user"
   | "users"
+  | "whatsapp"
   | "wifi"
-  | "wifi-off";
+  | "wifi-off"
+  | "x";
 
 const paths: Record<IconName, ReactNode> = {
   alert: (
@@ -36,6 +44,8 @@ const paths: Record<IconName, ReactNode> = {
       <line x1="12" x2="12.01" y1="16" y2="16" />
     </>
   ),
+  "arrow-left": <path d="m12 19-7-7 7-7M19 12H5" />,
+  "arrow-right": <path d="M5 12h14M12 5l7 7-7 7" />,
   calendar: (
     <>
       <rect width="18" height="18" x="3" y="4" rx="2" />
@@ -58,18 +68,41 @@ const paths: Record<IconName, ReactNode> = {
       <rect width="7" height="5" x="3" y="16" rx="1" />
     </>
   ),
-  download: (
-    <>
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-      <polyline points="7 10 12 15 17 10" />
-      <line x1="12" x2="12" y1="15" y2="3" />
-    </>
-  ),
   database: (
     <>
       <ellipse cx="12" cy="5" rx="9" ry="3" />
       <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
       <path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3" />
+    </>
+  ),
+  document: (
+    <>
+      <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+      <polyline points="14 2 14 8 20 8" />
+    </>
+  ),
+  history: (
+    <>
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M12 7v5l4 2" />
+    </>
+  ),
+  plus: <path d="M12 5v14M5 12h14" />,
+  refresh: (
+    <>
+      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+      <path d="M21 21v-5h-5" />
+    </>
+  ),
+  x: <path d="M18 6 6 18M6 6l12 12" />,
+  download: (
+    <>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" x2="12" y1="15" y2="3" />
     </>
   ),
   "id-card": (
@@ -176,6 +209,12 @@ const paths: Record<IconName, ReactNode> = {
       <path d="M16 21a7 7 0 0 0-14 0" />
       <circle cx="9" cy="8" r="4" />
       <path d="M17 11a3.5 3.5 0 1 0-2.5-6M18 14a5 5 0 0 1 4 5" />
+    </>
+  ),
+  whatsapp: (
+    <>
+      <path d="M3 21l1.65-3.8a9 9 0 1 1 3.4 2.9L3 21" />
+      <path d="M9 10a.5.5 0 0 0 1 0V9a.5.5 0 0 0-1 0v1a5 5 0 0 0 5 5h1a.5.5 0 0 0 0-1h-1a.5.5 0 0 0 0 1" />
     </>
   ),
   wifi: (

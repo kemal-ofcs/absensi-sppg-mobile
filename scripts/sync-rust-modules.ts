@@ -10,6 +10,17 @@ const filesToSync = [
   "administration.rs",
   "scanner.rs",
   "commands.rs",
+  // Tarif default payroll: satu sumber untuk SQLite lokal dan Turso cloud, di
+  // kedua workspace. Perbedaan sekecil apa pun di sini membuat baris seed lokal
+  // terdorong ke cloud dan menggandakan bracket pajak.
+  "payroll_seed.rs",
+  // Klien Turso: DDL cloud, seed katalog permission, dan guard prioritas
+  // absensi. Dulu berkas ini dipelihara terpisah dan sudah drift dua arah —
+  // seed permission Mobile ketinggalan lima permission payroll dan menanam dua
+  // permission yang tidak ada di `catalog.ts`, sementara hanya Mobile yang
+  // menanam shift default. Karena keduanya membangun database Turso yang sama,
+  // berkas ini WAJIB identik.
+  "turso.rs",
 ];
 
 for (const file of filesToSync) {

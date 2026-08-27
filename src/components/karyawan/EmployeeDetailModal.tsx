@@ -89,8 +89,30 @@ export function EmployeeDetailModal({
   const statusQr = String(employee.status_qr ?? "Belum");
   const statusBackup = String(employee.status_backup ?? "NORMAL");
 
-  // Nomor WA: hapus karakter non-digit, ganti awalan 0 dengan 62
-  const waNumber = noHp.replace(/\D/g, "").replace(/^0/, "62");
+  // Validasi & normalisasi nomor telepon dan WhatsApp
+  const rawNoHp = noHp.trim();
+  const phoneDigits = rawNoHp.replace(/\D/g, "");
+  const isValidPhone = Boolean(
+    rawNoHp &&
+      rawNoHp !== "-" &&
+      rawNoHp.toLowerCase() !== "null" &&
+      rawNoHp.toLowerCase() !== "undefined" &&
+      rawNoHp.toLowerCase() !== "tidak ada" &&
+      phoneDigits.length >= 5,
+  );
+
+  const telHref = isValidPhone
+    ? `tel:${rawNoHp.startsWith("+") ? `+${phoneDigits}` : phoneDigits}`
+    : null;
+
+  let waDigits = phoneDigits;
+  if (waDigits.startsWith("0")) {
+    waDigits = `62${waDigits.slice(1)}`;
+  } else if (waDigits.startsWith("8")) {
+    waDigits = `62${waDigits}`;
+  }
+  const waHref =
+    isValidPhone && waDigits.length >= 8 ? `https://wa.me/${waDigits}` : null;
 
   const isAktif = statusAktif === "Aktif";
 
@@ -222,37 +244,56 @@ export function EmployeeDetailModal({
             <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-2">
               Kontak &amp; Catatan
             </p>
-            {/* No. HP dengan aksi cepat */}
+            {/* No. HP dengan aksi cepat WhatsApp & Telepon */}
             <div className="flex items-center justify-between gap-2 py-2 border-b border-white/[0.05]">
-              <span className="text-[11px] font-medium text-slate-500">
+              <span className="text-[11px] font-medium text-slate-500 shrink-0">
                 No. HP
               </span>
-              {noHp ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-[12px] font-semibold text-slate-200">
-                    {noHp}
-                  </span>
-                  <a
-                    href={`tel:${noHp}`}
-                    aria-label={`Panggil ${nama}`}
-                    className="grid size-7 place-items-center rounded-lg bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 transition active:scale-95"
+              {isValidPhone ? (
+                <div className="flex items-center gap-2 min-w-0 justify-end">
+                  <span
+                    className="text-[12px] font-semibold text-slate-200 truncate max-w-[120px] xs:max-w-[150px]"
+                    title={rawNoHp}
                   >
-                    <Icon name="phone" className="size-3.5" />
-                  </a>
-                  {waNumber.length >= 10 ? (
-                    <a
-                      href={`https://wa.me/${waNumber}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      aria-label={`WhatsApp ${nama}`}
-                      className="grid size-7 place-items-center rounded-lg bg-green-500/15 text-green-400 hover:bg-green-500/25 transition active:scale-95 text-[10px] font-black"
-                    >
-                      WA
-                    </a>
-                  ) : null}
+                    {rawNoHp}
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {waHref ? (
+                      <a
+                        href={waHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={() => triggerHaptic("light")}
+                        title="Chat WhatsApp"
+                        aria-label={`Chat WhatsApp ${nama}`}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 border border-emerald-500/30 active:scale-95 transition-all shadow-sm"
+                      >
+                        <Icon name="whatsapp" className="size-3.5 shrink-0" />
+                        <span className="text-[10px] font-bold tracking-tight">
+                          WA
+                        </span>
+                      </a>
+                    ) : null}
+                    {telHref ? (
+                      <a
+                        href={telHref}
+                        onClick={() => triggerHaptic("light")}
+                        title="Panggil Telepon"
+                        aria-label={`Panggil Telepon ${nama}`}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-500/15 text-sky-400 hover:bg-sky-500/25 border border-sky-500/30 active:scale-95 transition-all shadow-sm"
+                      >
+                        <Icon name="phone" className="size-3.5 shrink-0" />
+                        <span className="text-[10px] font-bold tracking-tight">
+                          Telp
+                        </span>
+                      </a>
+                    ) : null}
+                  </div>
                 </div>
               ) : (
-                <span className="text-[12px] text-slate-500">-</span>
+                <span className="text-[12px] font-semibold text-slate-500">
+                  -
+                </span>
               )}
             </div>
             {/* Status QR */}

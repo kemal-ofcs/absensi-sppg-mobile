@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mobile-get-payroll-slip-detail"
+description = "Enables the mobile_get_payroll_slip_detail command without any pre-configured scope."
+commands.allow = ["mobile_get_payroll_slip_detail"]
+
+[[permission]]
+identifier = "deny-mobile-get-payroll-slip-detail"
+description = "Denies the mobile_get_payroll_slip_detail command without any pre-configured scope."
+commands.deny = ["mobile_get_payroll_slip_detail"]

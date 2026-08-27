@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ATTENDANCE_SOURCE_VALUES } from "@/lib/contracts/scanner";
 
 const eventIdSchema = z.string().regex(/^evt-[a-f0-9]{64}$/);
 const clientIdSchema = z.string().regex(/^desktop-[a-f0-9]{64}$/);
@@ -9,6 +10,19 @@ const finiteNumber = z.number().finite();
 const integer = z.number().int().safe();
 
 const optionalShortText = shortText.nullable().optional();
+
+/**
+ * Gerbang nilai `absensi_harian.sumber` / `log_scan.sumber_data` di batas sync.
+ *
+ * Daftarnya diambil dari `@/lib/contracts/scanner` supaya validator ini tidak
+ * bisa drift dari tipe yang dipakai kode aplikasi. Sebelumnya kedua kolom
+ * divalidasi sebagai teks bebas, sehingga nilai di luar CHECK constraint cloud
+ * lolos sampai ke outbox dan baru ditolak setelah round-trip jaringan.
+ */
+const optionalAttendanceSource = z
+  .enum(ATTENDANCE_SOURCE_VALUES)
+  .nullable()
+  .optional();
 const optionalLongText = longText.nullable().optional();
 const optionalNumber = finiteNumber.nullable().optional();
 
@@ -81,7 +95,7 @@ const scanLogSchema = z
     divisi: optionalShortText,
     jenis_scan: shortText.min(1),
     status_proses: optionalShortText,
-    sumber_data: optionalShortText,
+    sumber_data: optionalAttendanceSource,
     catatan_sistem: optionalLongText,
     keterangan: optionalLongText,
     menit_terlambat: optionalNumber,
@@ -102,7 +116,7 @@ const attendanceSchema = z
     status_kehadiran: optionalShortText,
     status_absen: optionalShortText,
     keterangan: optionalLongText,
-    sumber: optionalShortText,
+    sumber: optionalAttendanceSource,
     update_terakhir: optionalShortText,
     menit_terlambat: optionalNumber,
     menit_datang_awal: optionalNumber,
@@ -408,6 +422,125 @@ export const operationalSyncEventSchema = z.union([
       })
       .strict(),
   ),
+  eventSchema(
+    "payroll",
+    "salary-config",
+    z
+      .object({
+        id: shortText.min(1),
+        id_karyawan: shortText.min(1),
+        rate_per_hour: finiteNumber,
+        ptkp_status: shortText.min(1),
+        effective_date: shortText.min(1),
+        created_by: shortText.min(1),
+        created_at: shortText.min(1),
+      })
+      .strict(),
+  ),
+  eventSchema(
+    "payroll",
+    "overtime-rule",
+    z
+      .object({
+        id: shortText.min(1),
+        rule_type: z.enum(["HARI_KERJA", "HARI_LIBUR"]),
+        tier_order: finiteNumber,
+        hour_start: finiteNumber,
+        hour_end: finiteNumber.nullable().optional(),
+        multiplier: finiteNumber,
+        is_active: finiteNumber,
+      })
+      .strict(),
+  ),
+  eventSchema(
+    "payroll",
+    "payroll-component",
+    z
+      .object({
+        id: shortText.min(1),
+        name: shortText.min(1),
+        category: z.enum(["ALLOWANCE", "DEDUCTION"]),
+        calc_type: z.enum(["FIXED", "PERCENTAGE"]),
+        default_value: finiteNumber,
+        applies_to: shortText.min(1),
+        is_active: finiteNumber,
+      })
+      .strict(),
+  ),
+  eventSchema(
+    "payroll",
+    "tax-rule",
+    z
+      .object({
+        id: shortText.min(1),
+        category: shortText.min(1),
+        bracket_min: finiteNumber,
+        bracket_max: finiteNumber.nullable().optional(),
+        rate_percentage: finiteNumber,
+        effective_date: shortText.min(1),
+      })
+      .strict(),
+  ),
+  eventSchema(
+    "payroll",
+    "bpjs-rule",
+    z
+      .object({
+        id: shortText.min(1),
+        component_code: shortText.min(1),
+        component_name: shortText.min(1),
+        rate_percentage: finiteNumber,
+        wage_cap: finiteNumber.nullable().optional(),
+        effective_date: shortText.min(1),
+      })
+      .strict(),
+  ),
+  eventSchema(
+    "payroll",
+    "delete",
+    z
+      .object({
+        table: z.enum([
+          "salary_configs",
+          "overtime_tier_rules",
+          "payroll_components",
+          "tax_rules",
+          "bpjs_rules",
+        ]),
+        id: shortText.min(1),
+      })
+      .strict(),
+  ),
+  eventSchema(
+    "payroll",
+    "create-run",
+    z
+      .object({
+        run: z.record(z.string(), z.unknown()),
+        items: z.array(z.record(z.string(), z.unknown())),
+        audit: z.record(z.string(), z.unknown()),
+      })
+      .strict(),
+  ),
+  eventSchema(
+    "payroll",
+    "transition-status",
+    z
+      .object({
+        id: shortText.min(1),
+        status: z.enum([
+          "DRAFT",
+          "SUBMITTED",
+          "REVIEWED",
+          "APPROVED",
+          "PAID",
+          "REJECTED",
+        ]),
+        updated_at: shortText.min(1),
+        audit: z.record(z.string(), z.unknown()),
+      })
+      .strict(),
+  ),
 ]);
 
 export type OperationalSyncEvent = {
@@ -424,6 +557,11 @@ export type OperationalSyncEvent = {
 export const operationalSyncBatchSchema = z
   .object({
     clientId: clientIdSchema,
+    // Versi skema yang dipahami client pengirim; dicocokkan dengan
+    // CURRENT_SCHEMA_VERSION di route push. Opsional agar client lama yang
+    // belum mengirim field ini tetap terbaca — mereka ditolak di route dengan
+    // pesan yang jelas, bukan gagal validasi yang membingungkan.
+    schemaVersion: z.number().int().min(0).optional(),
     events: z.array(operationalSyncEventSchema).min(1).max(50),
   })
   .strict()
@@ -441,10 +579,12 @@ export const operationalSyncBatchSchema = z
 
 export function parseOperationalSyncBatch(input: unknown): {
   clientId: string;
+  schemaVersion?: number;
   events: OperationalSyncEvent[];
 } {
   return operationalSyncBatchSchema.parse(input) as {
     clientId: string;
+    schemaVersion?: number;
     events: OperationalSyncEvent[];
   };
 }

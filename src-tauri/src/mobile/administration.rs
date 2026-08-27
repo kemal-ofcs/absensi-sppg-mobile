@@ -1008,7 +1008,11 @@ pub fn create_backup(
     )
 }
 
-pub fn cancel_backup(state: &MobileState, id: &str, operator: &str) -> Result<Value, CommandError> {
+pub fn cancel_backup(
+    state: &MobileState,
+    id: &str,
+    operator: &str,
+) -> Result<Value, CommandError> {
     let client_id = sync::ensure_client_id(state)?;
     let mut connection = storage::database(&state.data_dir)?;
     let transaction = connection
@@ -2766,7 +2770,7 @@ pub fn delete_import_offline(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Mutex, RwLock};
 
     use reqwest::Client;
     use serde_json::json;
@@ -2820,11 +2824,11 @@ mod tests {
             )
             .expect("dashboard seed");
         let state = MobileState {
-            server_origin: std::sync::RwLock::new("http://localhost:3000".into()),
+            server_origin: RwLock::new("http://localhost:3000".to_string()),
             offline_max_age_hours: 24,
             data_dir: directory.path().to_path_buf(),
             http: Client::new(),
-            turso_config: std::sync::RwLock::new(None),
+            turso_config: RwLock::new(None),
             session: Mutex::new(None),
             vault_lock: Mutex::new(()),
         };

@@ -17,17 +17,106 @@ use super::{
     sync,
 };
 
-pub fn normalize_turso_url(raw: &str) -> Result<Url, CommandError> {
+/// Provider database cloud yang dipakai perangkat.
+///
+/// `Turso` adalah layanan terkelola (`libsql://<db>.turso.io`): selalu TLS dan
+/// selalu memerlukan Auth Token. `SelfHosted` adalah server libSQL milik
+/// pengguna sendiri (`sqld` / `libsql-server`) yang berjalan di komputer kantor,
+/// NAS, mesin LAN, atau VPS. Server seperti itu lazim dijalankan tanpa token dan
+/// tanpa sertifikat TLS, sehingga aturan validasinya memang berbeda.
+///
+/// Provider disimpan eksplisit, BUKAN ditebak dari bentuk URL. Kalau ditebak,
+/// satu salah ketik pada URL Turso (`http://` alih-alih `https://`) otomatis
+/// melonggarkan aturan transport tanpa pengguna pernah memilihnya.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseProvider {
+    #[default]
+    Turso,
+    #[serde(
+        alias = "selfHosted",
+        alias = "self-hosted",
+        alias = "custom",
+        alias = "local",
+        alias = "libsql"
+    )]
+    SelfHosted,
+}
+
+impl DatabaseProvider {
+    pub fn is_self_hosted(self) -> bool {
+        matches!(self, Self::SelfHosted)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Turso => "turso",
+            Self::SelfHosted => "self_hosted",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Turso => "Turso Cloud",
+            Self::SelfHosted => "Server Database Sendiri",
+        }
+    }
+}
+
+/// Alamat yang trafiknya tidak pernah meninggalkan perangkat atau LAN pengguna.
+///
+/// Dipakai untuk memutuskan apakah HTTP polos boleh dipakai. Daftar ini sengaja
+/// konservatif: hanya loopback, rentang privat RFC1918/RFC4193, link-local,
+/// nama domain LAN, dan dua alias host yang memang menunjuk mesin developer
+/// (`10.0.2.2` untuk emulator Android, `host.docker.internal` untuk container).
+pub fn is_private_network_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("host.docker.internal") {
+        return true;
+    }
+    // Alamat khusus emulator Android yang menunjuk balik ke mesin developer.
+    if host == "10.0.2.2" {
+        return true;
+    }
+    let lowered = host.to_ascii_lowercase();
+    if lowered.ends_with(".local") || lowered.ends_with(".lan") || lowered.ends_with(".internal") {
+        return true;
+    }
+    host.parse::<IpAddr>().is_ok_and(|ip| match ip {
+        IpAddr::V4(address) => {
+            address.is_loopback() || address.is_private() || address.is_link_local()
+        }
+        IpAddr::V6(address) => address.is_loopback() || address.is_unique_local(),
+    })
+}
+
+/// Validasi dan normalisasi URL endpoint database untuk provider tertentu.
+///
+/// Mengembalikan origin bersih tanpa path/query/fragment karena seluruh
+/// pemanggil menambahkan `/v2/pipeline` sendiri. Kredensial di dalam URL
+/// (`https://user:pass@host`) ditolak: token wajib lewat vault, bukan lewat URL
+/// yang ikut tersimpan di tabel setting dan ikut tampil di UI.
+pub fn normalize_database_url(
+    raw: &str,
+    provider: DatabaseProvider,
+    allow_insecure_transport: bool,
+) -> Result<Url, CommandError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(CommandError::new(
             "TURSO_URL_INVALID",
-            "URL database Turso tidak boleh kosong.",
+            "URL database tidak boleh kosong.",
         ));
     }
 
+    // `libsql://` dan `ws(s)://` hanyalah ejaan lain dari endpoint HTTP yang
+    // sama. Server libSQL self-hosted kerap dicetak dengan salah satu bentuk itu
+    // di dokumentasinya, jadi keduanya diterima dan dipetakan ke http(s).
     let https_url_str = if let Some(stripped) = trimmed.strip_prefix("libsql://") {
         format!("https://{stripped}")
+    } else if let Some(stripped) = trimmed.strip_prefix("wss://") {
+        format!("https://{stripped}")
+    } else if let Some(stripped) = trimmed.strip_prefix("ws://") {
+        format!("http://{stripped}")
     } else {
         trimmed.to_owned()
     };
@@ -35,35 +124,49 @@ pub fn normalize_turso_url(raw: &str) -> Result<Url, CommandError> {
     let mut parsed = Url::parse(&https_url_str).map_err(|_| {
         CommandError::new(
             "TURSO_URL_INVALID",
-            "Format URL database Turso tidak valid (contoh: libsql://db-name.turso.io atau https://db-name.turso.io).",
+            match provider {
+                DatabaseProvider::Turso => "Format URL database Turso tidak valid (contoh: libsql://db-name.turso.io atau https://db-name.turso.io).",
+                DatabaseProvider::SelfHosted => "Format URL server database tidak valid (contoh: http://192.168.1.10:8080 atau https://db.kantor-anda.com).",
+            },
         )
     })?;
 
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(CommandError::new(
             "TURSO_URL_INVALID",
-            "URL database Turso harus menggunakan protokol libsql://, https://, atau http://.",
+            "URL database harus memakai protokol libsql://, https://, atau http://.",
         ));
     }
     if parsed.host_str().is_none() || !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(CommandError::new(
             "TURSO_URL_INVALID",
-            "URL database Turso harus memiliki host dan tidak boleh memuat kredensial.",
+            "URL database harus memiliki host dan tidak boleh memuat kredensial.",
         ));
     }
+
     if parsed.scheme() == "http" {
         let host = parsed.host_str().unwrap_or_default();
-        let is_local = host.eq_ignore_ascii_case("localhost")
-            || host == "10.0.2.2"
-            || host.parse::<IpAddr>().is_ok_and(|ip| match ip {
-                IpAddr::V4(address) => address.is_loopback() || address.is_private(),
-                IpAddr::V6(address) => address.is_loopback() || address.is_unique_local(),
-            });
-        if !cfg!(debug_assertions) || !is_local {
-            return Err(CommandError::new(
-                "TURSO_URL_INSECURE",
-                "HTTP hanya diizinkan untuk localhost atau IP lokal pada build debug.",
-            ));
+        let is_private = is_private_network_host(host);
+        let allowed = match provider {
+            // Turso terkelola tidak pernah melayani HTTP polos di internet;
+            // satu-satunya HTTP yang masuk akal adalah `turso dev` lokal saat
+            // pengembangan.
+            DatabaseProvider::Turso => is_private && cfg!(debug_assertions),
+            // Server sendiri di jaringan privat: paket tidak pernah keluar dari
+            // LAN, jadi HTTP polos diizinkan pada build rilis sekalipun. Di luar
+            // jaringan privat, pengguna harus menyatakan risikonya secara sadar.
+            DatabaseProvider::SelfHosted => is_private || allow_insecure_transport,
+        };
+        if !allowed {
+            let message = match provider {
+                DatabaseProvider::Turso => {
+                    "URL database Turso wajib memakai HTTPS. Kalau ini server database Anda sendiri, pilih mode \"Server Database Sendiri\" terlebih dahulu."
+                }
+                DatabaseProvider::SelfHosted => {
+                    "Alamat server ini berada di luar jaringan privat, sehingga HTTP polos akan mengirim Auth Token dan data absensi tanpa enkripsi. Pasang HTTPS di server (misalnya lewat Caddy/Nginx), pakai alamat LAN/VPN, atau centang \"Izinkan koneksi tanpa enkripsi\" bila Anda menerima risikonya."
+                }
+            };
+            return Err(CommandError::new("TURSO_URL_INSECURE", message));
         }
     }
 
@@ -77,6 +180,121 @@ pub fn normalize_turso_url(raw: &str) -> Result<Url, CommandError> {
 pub struct TursoConfig {
     pub database_url: String,
     pub auth_token: String,
+    /// Default `Turso` supaya vault lama — yang hanya menyimpan `database_url`
+    /// dan `auth_token` — tetap terbaca apa adanya setelah aplikasi diperbarui.
+    #[serde(default)]
+    pub provider: DatabaseProvider,
+    /// Hanya bermakna untuk [`DatabaseProvider::SelfHosted`]: izin eksplisit
+    /// memakai HTTP polos ke host di luar jaringan privat.
+    #[serde(default)]
+    pub allow_insecure_transport: bool,
+}
+
+impl TursoConfig {
+    pub fn new(
+        database_url: String,
+        auth_token: String,
+        provider: DatabaseProvider,
+        allow_insecure_transport: bool,
+    ) -> Self {
+        Self {
+            database_url,
+            auth_token,
+            provider,
+            // Flag ini tidak punya arti di luar mode server sendiri; memaksanya
+            // `false` mencegah nilai basi ikut aktif kalau pengguna berpindah
+            // balik ke Turso lalu kembali lagi ke server sendiri.
+            allow_insecure_transport: provider.is_self_hosted() && allow_insecure_transport,
+        }
+    }
+
+    /// Konfigurasi Turso terkelola (bentuk lama dua-field).
+    pub fn turso(database_url: String, auth_token: String) -> Self {
+        Self::new(database_url, auth_token, DatabaseProvider::Turso, false)
+    }
+
+    /// Origin endpoint yang sudah tervalidasi menurut provider konfigurasi ini.
+    pub fn normalized_url(&self) -> Result<Url, CommandError> {
+        normalize_database_url(
+            &self.database_url,
+            self.provider,
+            self.allow_insecure_transport,
+        )
+    }
+
+    /// Apakah `raw` menunjuk database yang sama dengan konfigurasi ini.
+    ///
+    /// Perbandingan wajib ternormalisasi: `libsql://x`, `https://x`, dan
+    /// `https://x/` menunjuk database yang sama. Perbandingan string mentah
+    /// pernah membuat token yang tersimpan di vault dianggap milik database lain
+    /// hanya karena pengguna mengetik ejaan URL yang berbeda.
+    pub fn matches_url(&self, raw: &str) -> bool {
+        match (
+            self.normalized_url(),
+            normalize_database_url(raw, self.provider, self.allow_insecure_transport),
+        ) {
+            (Ok(current), Ok(candidate)) => current == candidate,
+            _ => self.database_url.trim() == raw.trim(),
+        }
+    }
+
+    /// Auth Token wajib ada sebelum koneksi boleh dicoba.
+    ///
+    /// Turso terkelola selalu wajib. Server sendiri boleh tanpa token — `sqld`
+    /// default berjalan tanpa autentikasi — kecuali endpoint-nya HTTPS publik,
+    /// yang berarti server itu terekspos ke internet dan token adalah satu-
+    /// satunya penghalang yang tersisa.
+    pub fn requires_auth_token(&self) -> bool {
+        match self.provider {
+            DatabaseProvider::Turso => true,
+            DatabaseProvider::SelfHosted => self.normalized_url().ok().is_some_and(|url| {
+                url.scheme() == "https"
+                    && !is_private_network_host(url.host_str().unwrap_or_default())
+            }),
+        }
+    }
+}
+
+/// Ringkasan konfigurasi database yang aman ditampilkan di UI.
+///
+/// Auth Token TIDAK PERNAH ikut. Frontend hanya perlu tahu bahwa token sudah
+/// tersimpan supaya bisa menampilkan "Tersimpan di Vault" dan membiarkan field
+/// isian kosong berarti "pertahankan token lama".
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseConfigView {
+    pub configured: bool,
+    pub database_url: String,
+    pub provider: String,
+    /// Nama provider yang siap ditampilkan, supaya UI tidak perlu menyimpan
+    /// salinan tabel terjemahannya sendiri dan ikut basi saat provider bertambah.
+    pub provider_label: String,
+    pub allow_insecure_transport: bool,
+    pub auth_token_saved: bool,
+}
+
+impl DatabaseConfigView {
+    pub fn empty() -> Self {
+        Self {
+            configured: false,
+            database_url: String::new(),
+            provider: DatabaseProvider::Turso.as_str().to_owned(),
+            provider_label: DatabaseProvider::Turso.label().to_owned(),
+            allow_insecure_transport: false,
+            auth_token_saved: false,
+        }
+    }
+
+    pub fn from_config(config: &TursoConfig) -> Self {
+        Self {
+            configured: true,
+            database_url: config.database_url.clone(),
+            provider: config.provider.as_str().to_owned(),
+            provider_label: config.provider.label().to_owned(),
+            allow_insecure_transport: config.allow_insecure_transport,
+            auth_token_saved: !config.auth_token.trim().is_empty(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -93,6 +311,85 @@ pub struct BootstrapStatus {
     pub configured: bool,
     pub required: bool,
     pub server_origin: String,
+    /// Apakah database cloud yang tersimpan benar-benar berhasil dihubungi.
+    ///
+    /// `configured = true` hanya berarti perangkat menyimpan kredensial; tidak
+    /// berarti kredensial itu masih menunjuk database yang hidup. Kalau database
+    /// lama sudah dihapus di Turso, `configured` tetap true sementara `reachable`
+    /// menjadi false — dan layar login harus memakai perbedaan itu untuk
+    /// menawarkan konfigurasi ulang, bukan menyembunyikannya sebagai kegagalan.
+    pub reachable: bool,
+    /// Alasan `reachable = false`, apa adanya dari klien Turso.
+    pub message: Option<String>,
+}
+
+impl BootstrapStatus {
+    /// Kredensial tersimpan tetapi database cloud-nya tidak menjawab.
+    pub fn unreachable(server_origin: String, error: &CommandError) -> Self {
+        Self {
+            configured: true,
+            required: false,
+            server_origin,
+            reachable: false,
+            message: Some(error.message.clone()),
+        }
+    }
+}
+
+/// Tabel inti yang wajib ada agar database dianggap benar-benar database Absensi SPPG.
+const DATABASE_CHECK_CORE_TABLES: [&str; 6] = [
+    "app_role",
+    "master_operator",
+    "master_data",
+    "tbl_shift",
+    "absensi_harian",
+    "log_scan",
+];
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseCheckResult {
+    pub reachable: bool,
+    pub server_origin: String,
+    pub latency_ms: Option<u64>,
+    pub empty_database: bool,
+    pub schema_ready: bool,
+    pub missing_tables: Vec<String>,
+    pub table_count: i64,
+    pub bootstrap_claimed: bool,
+    pub superadmin_exists: bool,
+    pub superadmin_count: i64,
+    pub superadmin_username: Option<String>,
+    pub operator_count: i64,
+    pub karyawan_count: i64,
+    pub attendance_count: i64,
+    pub company_name: Option<String>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+impl DatabaseCheckResult {
+    pub fn unreachable(server_origin: String, error: &CommandError) -> Self {
+        Self {
+            reachable: false,
+            server_origin,
+            latency_ms: None,
+            empty_database: false,
+            schema_ready: false,
+            missing_tables: Vec::new(),
+            table_count: 0,
+            bootstrap_claimed: false,
+            superadmin_exists: false,
+            superadmin_count: 0,
+            superadmin_username: None,
+            operator_count: 0,
+            karyawan_count: 0,
+            attendance_count: 0,
+            company_name: None,
+            error_code: Some(error.code.to_owned()),
+            error_message: Some(error.message.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -223,6 +520,131 @@ impl QueryResult {
     }
 }
 
+/// Cache proses-wide berisi URL database yang skemanya sudah diverifikasi mutakhir.
+///
+/// `MobileState::get_turso_client` membuat `TursoClient` baru setiap kali dipanggil,
+/// jadi cache tidak boleh menempel di instance — kalau tidak, `ensure_schema_current`
+/// menambah satu round-trip ke Turso di setiap push dan setiap pull.
+static SCHEMA_VERIFIED: std::sync::OnceLock<Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+
+fn schema_verified_cache() -> &'static Mutex<HashSet<String>> {
+    SCHEMA_VERIFIED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Satu tabel operasional cloud yang ikut ditarik ke SQLite lokal.
+///
+/// Daftar ini adalah sumber tunggal untuk dua hal sekaligus: query pembacaan
+/// snapshot dan daftar tabel yang dipasangi trigger `sync_pulse`. Menambah
+/// tabel snapshot baru cukup di sini — jangan bikin daftar kedua.
+struct SnapshotSource {
+    payload_key: &'static str,
+    table: &'static str,
+    sql: &'static str,
+}
+
+const SNAPSHOT_SOURCES: &[SnapshotSource] = &[
+    SnapshotSource {
+        payload_key: "employees",
+        table: "master_data",
+        sql: "SELECT * FROM master_data;",
+    },
+    SnapshotSource {
+        payload_key: "idCards",
+        table: "id_card",
+        sql: "SELECT * FROM id_card;",
+    },
+    SnapshotSource {
+        payload_key: "shifts",
+        table: "tbl_shift",
+        sql: "SELECT * FROM tbl_shift ORDER BY id_shift;",
+    },
+    SnapshotSource {
+        payload_key: "holidays",
+        table: "tbl_hari_libur",
+        sql: "SELECT * FROM tbl_hari_libur ORDER BY tanggal;",
+    },
+    SnapshotSource {
+        payload_key: "settings",
+        table: "setting_gex_system",
+        sql: "SELECT key, value FROM setting_gex_system;",
+    },
+    SnapshotSource {
+        payload_key: "companyProfiles",
+        table: "company_profile",
+        sql: "SELECT * FROM company_profile;",
+    },
+    SnapshotSource {
+        payload_key: "idCardTemplates",
+        table: "id_card_template",
+        sql: "SELECT * FROM id_card_template;",
+    },
+    SnapshotSource {
+        payload_key: "backups",
+        table: "backup_karyawan",
+        sql: "SELECT * FROM backup_karyawan;",
+    },
+    SnapshotSource {
+        payload_key: "corrections",
+        table: "koreksi_admin",
+        sql: "SELECT * FROM koreksi_admin;",
+    },
+    SnapshotSource {
+        payload_key: "imports",
+        table: "import_offline",
+        sql: "SELECT * FROM import_offline;",
+    },
+    SnapshotSource {
+        payload_key: "attendance",
+        table: "absensi_harian",
+        sql: "SELECT * FROM absensi_harian;",
+    },
+    SnapshotSource {
+        payload_key: "scanLogs",
+        table: "log_scan",
+        sql: "SELECT * FROM log_scan ORDER BY timestamp_scan;",
+    },
+    SnapshotSource {
+        payload_key: "salaryConfigs",
+        table: "salary_configs",
+        sql: "SELECT * FROM salary_configs ORDER BY id_karyawan, effective_date DESC;",
+    },
+    SnapshotSource {
+        payload_key: "overtimeTierRules",
+        table: "overtime_tier_rules",
+        sql: "SELECT * FROM overtime_tier_rules ORDER BY rule_type, tier_order;",
+    },
+    SnapshotSource {
+        payload_key: "payrollComponents",
+        table: "payroll_components",
+        sql: "SELECT * FROM payroll_components ORDER BY category, name;",
+    },
+    SnapshotSource {
+        payload_key: "taxRules",
+        table: "tax_rules",
+        sql: "SELECT * FROM tax_rules ORDER BY category, bracket_min;",
+    },
+    SnapshotSource {
+        payload_key: "bpjsRules",
+        table: "bpjs_rules",
+        sql: "SELECT * FROM bpjs_rules ORDER BY component_code;",
+    },
+    SnapshotSource {
+        payload_key: "payrollRuns",
+        table: "payroll_runs",
+        sql: "SELECT * FROM payroll_runs ORDER BY period_start DESC, created_at DESC;",
+    },
+    SnapshotSource {
+        payload_key: "payrollItems",
+        table: "payroll_items",
+        sql: "SELECT * FROM payroll_items ORDER BY created_at;",
+    },
+    SnapshotSource {
+        payload_key: "payrollAuditLogs",
+        table: "payroll_audit_logs",
+        sql: "SELECT * FROM payroll_audit_logs ORDER BY created_at;",
+    },
+];
+
 pub struct TursoClient {
     base_url: Url,
     auth_token: Zeroizing<String>,
@@ -239,11 +661,21 @@ impl TursoClient {
     }
 
     pub fn from_config(config: &TursoConfig, http: Client) -> Result<Self, CommandError> {
-        let base_url = normalize_turso_url(&config.database_url)?;
-        if config.auth_token.trim().is_empty() && base_url.scheme() == "https" {
+        // Validasi URL memakai provider yang benar-benar dipilih pengguna.
+        // Memakai aturan Turso untuk server sendiri akan menolak alamat LAN
+        // ber-HTTP yang justru menjadi tujuan mode itu.
+        let base_url = config.normalized_url()?;
+        if config.auth_token.trim().is_empty() && config.requires_auth_token() {
             return Err(CommandError::new(
                 "TURSO_TOKEN_REQUIRED",
-                "Auth Token database Turso wajib diisi untuk koneksi HTTPS.",
+                match config.provider {
+                    DatabaseProvider::Turso => {
+                        "Auth Token database Turso wajib diisi untuk koneksi HTTPS."
+                    }
+                    DatabaseProvider::SelfHosted => {
+                        "Server database ini dapat dijangkau dari internet, jadi Auth Token wajib diisi."
+                    }
+                },
             ));
         }
         Ok(Self::new(base_url, config.auth_token.clone(), http))
@@ -588,46 +1020,6 @@ impl TursoClient {
     }
 
     pub async fn ensure_schema(&self) -> Result<(), CommandError> {
-        let has_migration_table = self
-            .query_one(
-                "SELECT COUNT(*) AS total FROM sqlite_master WHERE type = 'table' AND name = 'schema_migration';",
-                vec![],
-            )
-            .await?
-            .to_objects()
-            .into_iter()
-            .next()
-            .and_then(|row| row.get("total").cloned())
-            .and_then(|value| {
-                value
-                    .as_i64()
-                    .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-            })
-            .unwrap_or(0)
-            > 0;
-        if has_migration_table {
-            let stabilization_applied = self
-                .query_one(
-                    "SELECT COUNT(*) AS total FROM schema_migration WHERE name = 'two-tier-schema-stabilization-v1';",
-                    vec![],
-                )
-                .await?
-                .to_objects()
-                .into_iter()
-                .next()
-                .and_then(|row| row.get("total").cloned())
-                .and_then(|value| {
-                    value
-                        .as_i64()
-                        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-                })
-                .unwrap_or(0)
-                > 0;
-            if stabilization_applied {
-                return Ok(());
-            }
-        }
-
         let schema_stmts = vec![
             Statement::new(
                 r#"CREATE TABLE IF NOT EXISTS schema_migration (
@@ -643,9 +1035,9 @@ impl TursoClient {
                     role_key TEXT UNIQUE NOT NULL,
                     nama_role TEXT UNIQUE NOT NULL,
                     deskripsi TEXT,
-                    is_system INTEGER NOT NULL DEFAULT 0,
-                    is_superadmin INTEGER NOT NULL DEFAULT 0,
-                    status TEXT NOT NULL DEFAULT 'Aktif',
+                    is_system INTEGER NOT NULL DEFAULT 0 CHECK(is_system IN (0, 1)),
+                    is_superadmin INTEGER NOT NULL DEFAULT 0 CHECK(is_superadmin IN (0, 1)),
+                    status TEXT NOT NULL DEFAULT 'Aktif' CHECK(status IN ('Aktif', 'Nonaktif')),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     created_by TEXT
@@ -658,7 +1050,7 @@ impl TursoClient {
                     nama TEXT NOT NULL,
                     grup TEXT NOT NULL,
                     deskripsi TEXT,
-                    is_active INTEGER NOT NULL DEFAULT 1,
+                    is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
                     sort_order INTEGER NOT NULL DEFAULT 0
                 );"#,
                 vec![],
@@ -667,7 +1059,7 @@ impl TursoClient {
                 r#"CREATE TABLE IF NOT EXISTS role_permission (
                     role_id INTEGER NOT NULL,
                     permission_key TEXT NOT NULL,
-                    is_allowed INTEGER NOT NULL DEFAULT 0,
+                    is_allowed INTEGER NOT NULL DEFAULT 0 CHECK(is_allowed IN (0, 1)),
                     updated_at TEXT NOT NULL,
                     updated_by TEXT,
                     PRIMARY KEY (role_id, permission_key),
@@ -683,7 +1075,7 @@ impl TursoClient {
                     nama_operator TEXT NOT NULL,
                     username TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
-                    role TEXT NOT NULL DEFAULT 'Operator',
+                    role TEXT NOT NULL DEFAULT 'Operator' CHECK(role IN ('Admin', 'Operator', 'Scanner')),
                     role_id INTEGER REFERENCES app_role(id),
                     status TEXT DEFAULT 'Aktif',
                     created_at TEXT,
@@ -768,7 +1160,8 @@ impl TursoClient {
                     divisi TEXT NOT NULL,
                     jenis_scan TEXT NOT NULL,
                     status_proses TEXT NOT NULL,
-                    sumber_data TEXT NOT NULL,
+                    sumber_data TEXT NOT NULL
+                        CHECK (sumber_data IN ('Scanner', 'Koreksi Admin', 'Import Offline', 'Import Manual', 'Generate Sistem')),
                     catatan_sistem TEXT,
                     keterangan TEXT,
                     menit_terlambat INTEGER DEFAULT 0,
@@ -790,7 +1183,8 @@ impl TursoClient {
                     status_kehadiran TEXT NOT NULL,
                     status_absen TEXT NOT NULL,
                     keterangan TEXT,
-                    sumber TEXT NOT NULL,
+                    sumber TEXT NOT NULL
+                        CHECK (sumber IN ('Scanner', 'Koreksi Admin', 'Import Offline', 'Import Manual', 'Generate Sistem')),
                     update_terakhir TEXT NOT NULL,
                     menit_terlambat INTEGER DEFAULT 0,
                     menit_datang_awal INTEGER DEFAULT 0,
@@ -911,9 +1305,9 @@ impl TursoClient {
                 r#"CREATE TABLE IF NOT EXISTS import_offline (
                     id_import INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_key TEXT UNIQUE NOT NULL,
-                    timestamp_input TEXT NOT NULL DEFAULT '',
-                    tanggal TEXT NOT NULL DEFAULT '',
-                    id_unik TEXT NOT NULL DEFAULT '',
+                    timestamp_input TEXT NOT NULL,
+                    tanggal TEXT NOT NULL,
+                    id_unik TEXT NOT NULL,
                     nama TEXT,
                     divisi TEXT,
                     jam_masuk TEXT,
@@ -942,43 +1336,92 @@ impl TursoClient {
                 vec![],
             ),
             Statement::new(
+                // Definisi WAJIB sama dengan `db-migrations.ts`: tabel ini ditulis
+                // jalur Rust MAUPUN jalur Web. Versi lama menaruh `server_revision`
+                // sebagai NOT NULL (padahal Web menulis NULL untuk event yang
+                // rejected/conflict) dan `receipt_json` NOT NULL tanpa DEFAULT
+                // (padahal INSERT Web tidak menyertakan kolom itu) — dua-duanya
+                // membuat push dari Web gagal di database hasil provisioning
+                // Desktop/Mobile.
                 r#"CREATE TABLE IF NOT EXISTS sync_operation_receipt (
                     event_id TEXT PRIMARY KEY,
                     client_id TEXT NOT NULL,
                     domain TEXT NOT NULL,
                     operation TEXT NOT NULL,
                     entity_key TEXT NOT NULL,
-                    payload_hash TEXT,
-                    server_revision INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    result_json TEXT,
+                    payload_hash TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('applied', 'rejected', 'conflict')),
+                    result_json TEXT NOT NULL,
                     base_revision INTEGER,
-                    actor_operator_id INTEGER,
-                    receipt_json TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    processed_at TEXT
+                    server_revision INTEGER,
+                    actor_operator_id INTEGER NOT NULL,
+                    receipt_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    processed_at TEXT NOT NULL
                 );"#,
                 vec![],
             ),
             Statement::new(
+                // `app_session` dan `auth_login_rate_limit` DIMILIKI aplikasi Web
+                // (`src/lib/auth/session-store.ts` dan `login-rate-limit.ts`);
+                // Rust tidak pernah membacanya. Definisi di bawah WAJIB sama
+                // persis dengan `db-migrations.ts`. Versi lama Rust memakai
+                // kolom karangan sendiri (`last_activity_at`, `identifier_hash`),
+                // sehingga database yang di-provisioning dari Desktop/Mobile
+                // membuat login Web gagal total.
                 r#"CREATE TABLE IF NOT EXISTS app_session (
                     session_id TEXT PRIMARY KEY,
+                    token_hash TEXT UNIQUE NOT NULL,
                     operator_id INTEGER NOT NULL,
+                    permission_revision INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
-                    last_activity_at TEXT NOT NULL,
-                    ip_address TEXT,
-                    user_agent TEXT,
+                    last_seen_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    revoked_reason TEXT,
+                    user_agent_hash TEXT,
                     FOREIGN KEY (operator_id) REFERENCES master_operator(id) ON DELETE CASCADE
                 );"#,
                 vec![],
             ),
             Statement::new(
                 r#"CREATE TABLE IF NOT EXISTS auth_login_rate_limit (
-                    identifier_hash TEXT PRIMARY KEY,
-                    failed_attempts INTEGER NOT NULL DEFAULT 0,
-                    lockout_until TEXT,
-                    last_attempt_at TEXT NOT NULL
+                    rate_key TEXT PRIMARY KEY,
+                    attempt_count INTEGER NOT NULL,
+                    window_started_at TEXT NOT NULL,
+                    blocked_until TEXT,
+                    updated_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                // Jejak audit RBAC, dipakai `src/lib/rbac/role-admin.ts`. Dulu
+                // hanya dibuat jalur Web, jadi database hasil provisioning
+                // Desktop/Mobile membuat manajemen role di Web gagal.
+                r#"CREATE TABLE IF NOT EXISTS role_permission_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role_id INTEGER NOT NULL,
+                    permission_key TEXT NOT NULL,
+                    before_allowed INTEGER NOT NULL,
+                    after_allowed INTEGER NOT NULL,
+                    changed_at TEXT NOT NULL,
+                    changed_by TEXT NOT NULL,
+                    revision INTEGER NOT NULL
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                // Changelog jalur Web (`src/lib/server/operational/*`). Berbeda
+                // dari `sync_changelog` milik pipeline Desktop/Mobile, dan ikut
+                // dihitung `isDatabaseSchemaReady` di sisi Web.
+                r#"CREATE TABLE IF NOT EXISTS sync_change_log (
+                    revision INTEGER PRIMARY KEY AUTOINCREMENT,
+                    domain TEXT NOT NULL,
+                    entity_key TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    changed_at TEXT NOT NULL,
+                    actor_operator_id INTEGER NOT NULL
                 );"#,
                 vec![],
             ),
@@ -1035,7 +1478,14 @@ impl TursoClient {
                 ('branding.manage', 'Kelola Profil & Template ID Card', 'Branding', 'Mengubah logo instansi dan desain kartu.', 1, 250),
                 ('sync.view', 'Lihat Status Sinkronisasi', 'Sinkronisasi', 'Melihat indikator dan status antrean sync cloud.', 1, 260),
                 ('sync.retry', 'Kirim Ulang & Atasi Konflik', 'Sinkronisasi', 'Memicu sinkronisasi manual dan resolusi konflik.', 1, 270),
-                ('diagnostics.view', 'Lihat Diagnostik Sistem', 'Diagnostik', 'Melihat informasi runtime dan kesehatan database.', 1, 280);"#,
+                ('diagnostics.view', 'Lihat Diagnostik Sistem', 'Diagnostik', 'Melihat informasi runtime dan kesehatan database.', 1, 280),
+                ('payroll.view', 'Akses Modul Penggajian', 'Penggajian', 'Melihat estimasi dan rekap penggajian karyawan.', 1, 290),
+                ('payroll.run.create', 'Buat & Jalankan Batch Payroll', 'Penggajian', 'Membuat dan menjalankan batch payroll resmi.', 1, 300),
+                ('payroll.run.review', 'Review Batch Payroll', 'Penggajian', 'Meninjau batch payroll sebelum disetujui.', 1, 301),
+                ('payroll.run.approve', 'Setujui Batch Payroll', 'Penggajian', 'Menyetujui batch payroll yang telah direview.', 1, 302),
+                ('payroll.run.disburse', 'Tandai Dibayar & Kunci Slip', 'Penggajian', 'Menandai batch payroll sebagai dibayar dan mengunci slip.', 1, 303),
+                ('payroll.config.manage', 'Kelola Aturan Penggajian', 'Penggajian', 'Mengatur rate gaji, lembur, PPh 21, dan BPJS.', 1, 310),
+                ('payroll.export', 'Ekspor Laporan & Slip Gaji', 'Penggajian', 'Mengunduh rekap penggajian dan slip gaji.', 1, 320);"#,
                 vec![],
             ),
             // Seed Default Role Permissions untuk Role Superadmin (Role 1)
@@ -1049,16 +1499,6 @@ impl TursoClient {
                 r#"INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by)
                 SELECT 2, permission_key, 1, datetime('now'), 'system' FROM app_permission
                 WHERE permission_key NOT IN ('roles.manage', 'operators.manage');"#,
-                vec![],
-            ),
-            // Seed Shifts
-            Statement::new(
-                r#"INSERT OR IGNORE INTO tbl_shift (id_shift, kode_shift, nama_shift, jam_masuk, jam_pulang, awal_absen_menit, batas_masuk_menit, toleransi_masuk_menit, jam_kerja_normal_menit, istirahat_menit, batas_pulang_menit, offset_istirahat_mulai, offset_generate_alfa, buffer_shift_malam_menit, izinkan_multi_sesi) VALUES
-                (1, 1, 'Shift Pagi', '07:00', '15:00', 120, 60, 15, 480, 60, 240, 240, 180, 120, 0),
-                (2, 2, 'Shift Siang', '15:00', '23:00', 120, 60, 15, 480, 60, 240, 240, 180, 120, 0),
-                (3, 3, 'Shift Malam', '23:00', '07:00', 120, 60, 15, 480, 60, 240, 240, 180, 120, 0),
-                (4, 4, 'Shift Fleksibel', '08:00', '17:00', 120, 120, 0, 540, 60, 240, 240, 180, 120, 0),
-                (5, 5, 'Shift Khusus', '06:00', '18:00', 120, 60, 15, 720, 60, 240, 240, 180, 120, 0);"#,
                 vec![],
             ),
             // Seed Settings
@@ -1086,10 +1526,144 @@ impl TursoClient {
                 ('default_template', 'Template Default SPPG', 'landscape', ?, 1, datetime('now'), datetime('now'));"#,
                 vec![json!(serde_json::to_string(&crate::mobile::operational::default_id_card_elements()).unwrap_or_else(|_| "[]".to_string()))],
             ),
+            // Payroll DDL
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS salary_configs (
+                    id TEXT PRIMARY KEY,
+                    id_karyawan TEXT NOT NULL,
+                    rate_per_hour REAL NOT NULL CHECK (rate_per_hour >= 0),
+                    ptkp_status TEXT NOT NULL DEFAULT 'TK/0'
+                        CHECK (ptkp_status IN ('TK/0','TK/1','TK/2','TK/3','K/0','K/1','K/2','K/3')),
+                    effective_date TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(id_karyawan, effective_date),
+                    FOREIGN KEY (id_karyawan) REFERENCES master_data(id_unik) ON DELETE CASCADE
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS overtime_tier_rules (
+                    id TEXT PRIMARY KEY,
+                    rule_type TEXT NOT NULL CHECK (rule_type IN ('HARI_KERJA', 'HARI_LIBUR')),
+                    tier_order INTEGER NOT NULL,
+                    hour_start REAL NOT NULL CHECK (hour_start >= 0),
+                    hour_end REAL,
+                    multiplier REAL NOT NULL CHECK (multiplier >= 1.0),
+                    is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+                    UNIQUE(rule_type, tier_order)
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS payroll_components (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    category TEXT NOT NULL CHECK (category IN ('ALLOWANCE', 'DEDUCTION')),
+                    calc_type TEXT NOT NULL CHECK (calc_type IN ('FIXED', 'PERCENTAGE')),
+                    default_value REAL NOT NULL DEFAULT 0 CHECK (default_value >= 0),
+                    applies_to TEXT NOT NULL DEFAULT 'ALL',
+                    is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS tax_rules (
+                    id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL CHECK (category IN ('TER_A','TER_B','TER_C','PASAL_17')),
+                    bracket_min REAL NOT NULL,
+                    bracket_max REAL,
+                    rate_percentage REAL NOT NULL CHECK (rate_percentage >= 0),
+                    effective_date TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS bpjs_rules (
+                    id TEXT PRIMARY KEY,
+                    component_code TEXT UNIQUE NOT NULL,
+                    component_name TEXT NOT NULL,
+                    rate_percentage REAL NOT NULL CHECK (rate_percentage >= 0),
+                    wage_cap REAL,
+                    effective_date TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS payroll_runs (
+                    id TEXT PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    period_start TEXT NOT NULL,
+                    period_end TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'DRAFT'
+                        CHECK (status IN ('DRAFT','SUBMITTED','REVIEWED','APPROVED','PAID','REJECTED')),
+                    total_gross_payout INTEGER NOT NULL DEFAULT 0,
+                    total_net_payout INTEGER NOT NULL DEFAULT 0,
+                    total_employees INTEGER NOT NULL DEFAULT 0,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS payroll_items (
+                    id TEXT PRIMARY KEY,
+                    payroll_run_id TEXT NOT NULL REFERENCES payroll_runs(id) ON DELETE CASCADE,
+                    id_karyawan TEXT NOT NULL,
+                    nama_karyawan TEXT NOT NULL,
+                    divisi TEXT NOT NULL,
+                    ptkp_status TEXT NOT NULL DEFAULT 'TK/0',
+                    total_regular_hours REAL NOT NULL,
+                    total_overtime_hours REAL NOT NULL,
+                    total_overtime_index REAL NOT NULL,
+                    rate_per_hour INTEGER NOT NULL,
+                    basic_salary INTEGER NOT NULL CHECK (basic_salary >= 0),
+                    overtime_salary INTEGER NOT NULL CHECK (overtime_salary >= 0),
+                    gross_salary INTEGER NOT NULL CHECK (gross_salary >= 0),
+                    total_allowances INTEGER NOT NULL DEFAULT 0,
+                    total_deductions INTEGER NOT NULL DEFAULT 0,
+                    bpjs_employee_total INTEGER NOT NULL DEFAULT 0,
+                    bpjs_company_total INTEGER NOT NULL DEFAULT 0,
+                    pph21_amount INTEGER NOT NULL DEFAULT 0,
+                    net_salary INTEGER NOT NULL CHECK (net_salary >= 0),
+                    breakdown_snapshot TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE (payroll_run_id, id_karyawan)
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS payroll_audit_logs (
+                    id TEXT PRIMARY KEY,
+                    payroll_run_id TEXT NOT NULL REFERENCES payroll_runs(id) ON DELETE CASCADE,
+                    action TEXT NOT NULL,
+                    old_status TEXT,
+                    new_status TEXT NOT NULL,
+                    performed_by TEXT NOT NULL,
+                    notes TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );"#,
+                vec![],
+            ),
+            Statement::new("CREATE INDEX IF NOT EXISTS idx_salary_configs_karyawan ON salary_configs(id_karyawan, effective_date DESC);", vec![]),
+            Statement::new("CREATE INDEX IF NOT EXISTS idx_overtime_rules_type ON overtime_tier_rules(rule_type, tier_order ASC);", vec![]),
+            Statement::new("CREATE INDEX IF NOT EXISTS idx_payroll_runs_periode ON payroll_runs(period_start, period_end, status);", vec![]),
+            Statement::new("CREATE INDEX IF NOT EXISTS idx_payroll_items_run ON payroll_items(payroll_run_id);", vec![]),
+            Statement::new("CREATE INDEX IF NOT EXISTS idx_payroll_items_karyawan ON payroll_items(id_karyawan);", vec![]),
+            // Seed Default Overtime Rules
+            Statement::new(crate::mobile::payroll_seed::OVERTIME_TIER_RULES_SEED_SQL, vec![]),
+            // Seed Default Tax Rules (Pasal 17 & TER Baseline)
+            Statement::new(crate::mobile::payroll_seed::TAX_RULES_SEED_SQL, vec![]),
+            // Seed Default BPJS Rules
+            Statement::new(crate::mobile::payroll_seed::BPJS_RULES_SEED_SQL, vec![]),
             // Seed Schema Migration
             Statement::new(
                 r#"INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES
-                (8, 'initial_cloud_schema', datetime('now'));"#,
+                (10, 'payroll-engine-v1', datetime('now'));"#,
                 vec![],
             ),
         ];
@@ -1166,6 +1740,14 @@ impl TursoClient {
             ("sync_operation_receipt", "actor_operator_id", "ALTER TABLE sync_operation_receipt ADD COLUMN actor_operator_id INTEGER;"),
             ("sync_operation_receipt", "receipt_json", "ALTER TABLE sync_operation_receipt ADD COLUMN receipt_json TEXT NOT NULL DEFAULT '{}';"),
             ("sync_operation_receipt", "processed_at", "ALTER TABLE sync_operation_receipt ADD COLUMN processed_at TEXT;"),
+            // Kolom berikut hanya dibuat jalur provisioning Rust, sehingga
+            // database yang lahir dari jalur Web tidak memilikinya. Ditambahkan
+            // di sini supaya klien mana pun bisa menyembuhkannya. Nullable:
+            // SQLite menolak `ADD COLUMN` dengan default non-konstan seperti
+            // `datetime('now')` — hanya `CREATE TABLE` yang mengizinkannya.
+            ("tax_rules", "created_at", "ALTER TABLE tax_rules ADD COLUMN created_at TEXT;"),
+            ("bpjs_rules", "created_at", "ALTER TABLE bpjs_rules ADD COLUMN created_at TEXT;"),
+            ("payroll_components", "created_at", "ALTER TABLE payroll_components ADD COLUMN created_at TEXT;"),
         ] {
             self.ensure_column(table, column, sql).await?;
         }
@@ -1189,14 +1771,243 @@ impl TursoClient {
             vec![],
         )
         .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2003, 'payroll-engine-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+
+        // Selaraskan ulang counter AUTOINCREMENT yang terlanjur melar. Sebelum perbaikan,
+        // setiap "INSERT ... ON CONFLICT DO UPDATE" tetap menghabiskan satu nomor urut
+        // meskipun tidak ada baris baru, sehingga id melompat (mis. 7 -> 69 -> 111).
+        // Dijalankan sekali saja karena ensure_schema hanya dipanggil ketika penanda
+        // migrasi -2004 belum ada.
+        for (table, primary_key) in [
+            ("tbl_shift", "id_shift"),
+            ("id_card", "id_card_id"),
+            ("absensi_harian", "id_absensi"),
+            ("koreksi_admin", "id_koreksi"),
+            ("tbl_hari_libur", "id_libur"),
+            ("import_offline", "id_import"),
+            ("log_scan", "id_log"),
+            ("audit_absensi", "id_audit"),
+            ("master_operator", "id"),
+        ] {
+            let realign = format!(
+                "UPDATE sqlite_sequence SET seq = (SELECT COALESCE(MAX({primary_key}), 0) FROM {table}) WHERE name = '{table}' AND seq > (SELECT COALESCE(MAX({primary_key}), 0) FROM {table});"
+            );
+            let _ = self.query_one(realign, vec![]).await;
+        }
+
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2004, 'autoincrement-sequence-realign-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+
+        self.ensure_sync_pulse().await?;
+        self.purge_legacy_rate_rows().await?;
+        self.repair_web_owned_tables().await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2006, 'sync-pulse-rate-seed-and-cloud-schema-unification-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
 
         Ok(())
     }
 
+    /// Membangun ulang tabel milik Web yang terlanjur dibuat dengan skema karangan Rust.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` tidak memperbaiki tabel yang sudah ada, jadi
+    /// database yang pernah di-provisioning dari Desktop/Mobile akan selamanya
+    /// memakai kolom yang salah dan membuat login Web gagal. Kedua tabel ini
+    /// hanya menyimpan data sementara — sesi login dan penghitung rate limit —
+    /// sehingga membangunnya ulang aman: pengguna Web cukup login lagi.
+    async fn repair_web_owned_tables(&self) -> Result<(), CommandError> {
+        for (table, required_column, create_sql) in [
+            (
+                "app_session",
+                "token_hash",
+                r#"CREATE TABLE app_session (
+                    session_id TEXT PRIMARY KEY,
+                    token_hash TEXT UNIQUE NOT NULL,
+                    operator_id INTEGER NOT NULL,
+                    permission_revision INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    revoked_reason TEXT,
+                    user_agent_hash TEXT,
+                    FOREIGN KEY (operator_id) REFERENCES master_operator(id) ON DELETE CASCADE
+                );"#,
+            ),
+            (
+                "auth_login_rate_limit",
+                "rate_key",
+                r#"CREATE TABLE auth_login_rate_limit (
+                    rate_key TEXT PRIMARY KEY,
+                    attempt_count INTEGER NOT NULL,
+                    window_started_at TEXT NOT NULL,
+                    blocked_until TEXT,
+                    updated_at TEXT NOT NULL
+                );"#,
+            ),
+        ] {
+            let Ok(info) = self
+                .query_one(format!("PRAGMA table_info({table});"), vec![])
+                .await
+            else {
+                continue;
+            };
+            let rows = info.to_objects();
+            // Tabel belum ada: `ensure_schema` di atas sudah membuatnya benar.
+            if rows.is_empty() {
+                continue;
+            }
+            let correct = rows.iter().any(|row| {
+                row.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name == required_column)
+            });
+            if correct {
+                continue;
+            }
+            let _ = self
+                .query_one(format!("DROP TABLE IF EXISTS {table};"), vec![])
+                .await;
+            self.query_one(create_sql, vec![]).await?;
+        }
+        Ok(())
+    }
+
+    /// Menghapus baris tarif hasil seed lokal versi lama yang sempat terdorong ke cloud.
+    ///
+    /// Seed lokal dulu memakai id bertanda hubung (`tax-p17-1`, `bpjs-jkk`) sedangkan
+    /// cloud memakai garis bawah, sehingga backfill outbox menambahkan bracket
+    /// PASAL_17 kedua di cloud dan seluruh perangkat menarik tarif dobel itu.
+    /// Daftar id sengaja eksplisit supaya tarif buatan admin tidak pernah tersentuh.
+    async fn purge_legacy_rate_rows(&self) -> Result<(), CommandError> {
+        let placeholders = vec!["?"; crate::mobile::payroll_seed::LEGACY_RATE_IDS.len()].join(", ");
+        let args: Vec<Value> = crate::mobile::payroll_seed::LEGACY_RATE_IDS
+            .iter()
+            .map(|id| json!(id))
+            .collect();
+        for table in ["tax_rules", "bpjs_rules", "overtime_tier_rules"] {
+            let _ = self
+                .query_one(
+                    format!("DELETE FROM {table} WHERE id IN ({placeholders});"),
+                    args.clone(),
+                )
+                .await;
+        }
+        // Changelog dan receipt event lama ikut dibuang supaya perangkat yang
+        // masih mengantre event tersebut tidak menghidupkannya kembali.
+        let _ = self
+            .query_one(
+                format!("DELETE FROM sync_changelog WHERE domain = 'payroll' AND entity_key IN ({placeholders});"),
+                args,
+            )
+            .await;
+
+        // Konfigurasi koneksi milik satu perangkat pernah ikut terdorong ke cloud
+        // lewat "Kirim ulang pengaturan lokal", lalu tertarik oleh perangkat lain.
+        let setting_placeholders =
+            vec!["?"; crate::mobile::sync::DEVICE_LOCAL_SETTING_KEYS.len()].join(", ");
+        let setting_args: Vec<Value> = crate::mobile::sync::DEVICE_LOCAL_SETTING_KEYS
+            .iter()
+            .map(|key| json!(key))
+            .collect();
+        let _ = self
+            .query_one(
+                format!("DELETE FROM setting_gex_system WHERE key IN ({setting_placeholders});"),
+                setting_args.clone(),
+            )
+            .await;
+        let _ = self
+            .query_one(
+                format!("DELETE FROM sync_changelog WHERE domain = 'setting' AND entity_key IN ({setting_placeholders});"),
+                setting_args,
+            )
+            .await;
+        Ok(())
+    }
+
+    /// Memasang penghitung perubahan per tabel (`sync_pulse`) beserta trigger-nya.
+    ///
+    /// Ini yang membuat pull inkremental aman: penghitung dinaikkan oleh trigger
+    /// SQLite, jadi ikut naik untuk SEMUA jalur tulis — push Desktop/Mobile,
+    /// route handler Web yang menulis langsung ke Turso, maupun perubahan manual.
+    /// Client cukup membandingkan angka ini untuk tahu tabel mana yang basi.
+    async fn ensure_sync_pulse(&self) -> Result<(), CommandError> {
+        let mut statements = vec![
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS sync_pulse (
+                    table_name TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+        ];
+        for source in SNAPSHOT_SOURCES {
+            let table = source.table;
+            // Diseed pada revisi 1 supaya client yang sudah sinkron penuh punya
+            // angka pembanding, bukan 0 yang ambigu dengan "cursor lokal kosong".
+            statements.push(Statement::new(
+                format!(
+                    "INSERT OR IGNORE INTO sync_pulse (table_name, revision, updated_at) VALUES ('{table}', 1, datetime('now'));"
+                ),
+                vec![],
+            ));
+            for (suffix, event) in [("ins", "INSERT"), ("upd", "UPDATE"), ("del", "DELETE")] {
+                statements.push(Statement::new(
+                    format!(
+                        r#"CREATE TRIGGER IF NOT EXISTS trg_sync_pulse_{table}_{suffix}
+                        AFTER {event} ON {table}
+                        BEGIN
+                          INSERT INTO sync_pulse (table_name, revision, updated_at)
+                          VALUES ('{table}', 1, datetime('now'))
+                          ON CONFLICT(table_name) DO UPDATE SET
+                            revision = revision + 1,
+                            updated_at = datetime('now');
+                        END;"#
+                    ),
+                    vec![],
+                ));
+            }
+        }
+        // Dikirim per rombongan supaya pemasangan ~80 statement DDL ini tidak
+        // menjadi 80 round-trip berurutan saat login pertama setelah pembaruan.
+        // Tabel bisa saja belum ada di database lama, jadi kegagalan satu
+        // rombongan diulang satu per satu dan tetap tidak menggagalkan
+        // `ensure_schema` secara keseluruhan.
+        for chunk in statements.chunks(24) {
+            if self.execute_pipeline(chunk.to_vec()).await.is_ok() {
+                continue;
+            }
+            for statement in chunk {
+                let _ = self
+                    .query_one(statement.sql.clone(), statement.args.clone())
+                    .await;
+            }
+        }
+        Ok(())
+    }
+
     async fn ensure_schema_current(&self) -> Result<(), CommandError> {
+        let cache_key = self.base_url.as_str().to_owned();
+        if schema_verified_cache()
+            .lock()
+            .map(|verified| verified.contains(&cache_key))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
         let current = self
             .query_one(
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2002;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2006;",
                 vec![],
             )
             .await
@@ -1206,11 +2017,131 @@ impl TursoClient {
             .and_then(|value| value.as_i64())
             .unwrap_or(0)
             > 0;
-        if current {
-            Ok(())
-        } else {
-            self.ensure_schema().await
+        if !current {
+            self.ensure_schema().await?;
         }
+        if let Ok(mut verified) = schema_verified_cache().lock() {
+            verified.insert(cache_key);
+        }
+        Ok(())
+    }
+
+    /// Pemeriksaan database provisioning bersifat READ-ONLY: tidak membuat schema,
+    /// tidak menulis apa pun. Salah input URL tidak boleh mencemari database lain.
+    pub async fn inspect_database(&self) -> Result<DatabaseCheckResult, CommandError> {
+        let started = std::time::Instant::now();
+        let tables_result = self
+            .query_one(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%';",
+                vec![],
+            )
+            .await?;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        let tables: Vec<String> = tables_result
+            .to_objects()
+            .into_iter()
+            .filter_map(|row| {
+                row.get("name")
+                    .and_then(Value::as_str)
+                    .map(|name| name.to_owned())
+            })
+            .collect();
+        let has_table = |name: &str| tables.iter().any(|table| table == name);
+        let missing_tables: Vec<String> = DATABASE_CHECK_CORE_TABLES
+            .iter()
+            .filter(|table| !has_table(table))
+            .map(|table| (*table).to_owned())
+            .collect();
+
+        let mut check = DatabaseCheckResult {
+            reachable: true,
+            server_origin: self.base_url.origin().ascii_serialization(),
+            latency_ms: Some(latency_ms),
+            empty_database: tables.is_empty(),
+            schema_ready: missing_tables.is_empty(),
+            missing_tables,
+            table_count: tables.len() as i64,
+            bootstrap_claimed: false,
+            superadmin_exists: false,
+            superadmin_count: 0,
+            superadmin_username: None,
+            operator_count: 0,
+            karyawan_count: 0,
+            attendance_count: 0,
+            company_name: None,
+            error_code: None,
+            error_message: None,
+        };
+
+        if has_table("app_bootstrap_state") {
+            check.bootstrap_claimed = self
+                .count_scalar(
+                    "SELECT COUNT(*) AS total FROM app_bootstrap_state WHERE bootstrap_key = 'superadmin';",
+                )
+                .await?
+                > 0;
+        }
+        if has_table("master_operator") && has_table("app_role") {
+            let superadmins = self
+                .query_one(
+                    r#"SELECT m.username AS username
+                       FROM master_operator m
+                       JOIN app_role r ON r.id = m.role_id
+                       WHERE m.status = 'Aktif' AND r.is_superadmin = 1
+                       ORDER BY m.id ASC;"#,
+                    vec![],
+                )
+                .await?
+                .to_objects();
+            check.superadmin_count = superadmins.len() as i64;
+            check.superadmin_exists = check.superadmin_count > 0;
+            check.superadmin_username = superadmins
+                .first()
+                .and_then(|row| row.get("username"))
+                .and_then(Value::as_str)
+                .map(|username| username.to_owned());
+            check.operator_count = self
+                .count_scalar("SELECT COUNT(*) AS total FROM master_operator WHERE status = 'Aktif';")
+                .await?;
+        }
+        if has_table("master_data") {
+            check.karyawan_count = self
+                .count_scalar("SELECT COUNT(*) AS total FROM master_data;")
+                .await?;
+        }
+        if has_table("absensi_harian") {
+            check.attendance_count = self
+                .count_scalar("SELECT COUNT(*) AS total FROM absensi_harian;")
+                .await?;
+        }
+        if has_table("company_profile") {
+            check.company_name = self
+                .query_one("SELECT company_name FROM company_profile LIMIT 1;", vec![])
+                .await?
+                .to_objects()
+                .first()
+                .and_then(|row| row.get("company_name"))
+                .and_then(Value::as_str)
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty());
+        }
+        Ok(check)
+    }
+
+    async fn count_scalar(&self, sql: &str) -> Result<i64, CommandError> {
+        Ok(self
+            .query_one(sql, vec![])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next()
+            .and_then(|row| row.get("total").cloned())
+            .and_then(|value| {
+                value
+                    .as_i64()
+                    .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+            })
+            .unwrap_or(0))
     }
 
     pub async fn bootstrap_status(&self) -> Result<BootstrapStatus, CommandError> {
@@ -1239,6 +2170,8 @@ impl TursoClient {
             configured: true,
             required: active_superadmins == 0,
             server_origin: self.base_url.origin().ascii_serialization(),
+            reachable: true,
+            message: None,
         })
     }
 
@@ -1366,6 +2299,19 @@ impl TursoClient {
             )
             .await?;
         }
+        self.hydrate_operator(row, op_id).await
+    }
+
+    /// Susun `OperatorUser` lengkap dari satu baris `master_operator` + `app_role`.
+    ///
+    /// Dipakai bersama oleh login dan pemuatan ulang sesi. Menyalin blok ini ke
+    /// dua tempat akan membuat keduanya drift: permission hasil login dan
+    /// permission hasil revalidasi harus dihitung dengan aturan yang persis sama.
+    async fn hydrate_operator(
+        &self,
+        row: &HashMap<String, Value>,
+        operator_id: i64,
+    ) -> Result<OperatorUser, CommandError> {
         let kode_operator = row
             .get("kode_operator")
             .and_then(Value::as_str)
@@ -1421,10 +2367,10 @@ impl TursoClient {
             })
             .collect();
 
-        // Query revision dari setting_gex_system
+        // Ambil rbac_revision
         let rev_query = self
             .query_one(
-                "SELECT value FROM setting_gex_system WHERE key = 'rbac_revision';",
+                "SELECT value FROM setting_gex_system WHERE key = 'rbac_revision' LIMIT 1;",
                 vec![],
             )
             .await;
@@ -1440,7 +2386,7 @@ impl TursoClient {
             .unwrap_or(1);
 
         Ok(OperatorUser {
-            id: op_id,
+            id: operator_id,
             kode_operator,
             nama_operator,
             username,
@@ -1454,112 +2400,119 @@ impl TursoClient {
         })
     }
 
-    pub async fn pull_snapshot(&self, last_revision: i64) -> Result<Value, CommandError> {
-        self.ensure_schema_current().await?;
-        let tables = [
-            ("employees", "SELECT * FROM master_data;"),
-            ("idCards", "SELECT * FROM id_card;"),
-            ("shifts", "SELECT * FROM tbl_shift ORDER BY id_shift;"),
-            ("holidays", "SELECT * FROM tbl_hari_libur ORDER BY tanggal;"),
-            ("settings", "SELECT key, value FROM setting_gex_system;"),
-            ("companyProfiles", "SELECT * FROM company_profile;"),
-            ("idCardTemplates", "SELECT * FROM id_card_template;"),
-            ("backups", "SELECT * FROM backup_karyawan;"),
-            ("corrections", "SELECT * FROM koreksi_admin;"),
-            ("imports", "SELECT * FROM import_offline;"),
-            ("attendance", "SELECT * FROM absensi_harian;"),
-            (
-                "scanLogs",
-                "SELECT * FROM log_scan ORDER BY timestamp_scan;",
-            ),
-        ];
+    /// Muat ulang status dan permission operator yang sedang memegang sesi.
+    ///
+    /// `Ok(None)` berarti operator sudah dihapus, dinonaktifkan, atau role-nya
+    /// dimatikan di cloud — sesi perangkat WAJIB dicabut. Kegagalan jaringan
+    /// tetap dikembalikan sebagai `Err` supaya sesi tidak pernah dicabut hanya
+    /// karena koneksi sedang terganggu; itu akan membuat perangkat lapangan
+    /// terlempar keluar setiap kali sinyal turun.
+    pub async fn reload_operator(
+        &self,
+        operator_id: i64,
+    ) -> Result<Option<OperatorUser>, CommandError> {
+        let sql = r#"
+            SELECT
+                m.id, m.kode_operator, m.nama_operator, m.username,
+                m.role_id, r.role_key, r.nama_role, r.is_superadmin
+            FROM master_operator m
+            JOIN app_role r ON r.id = m.role_id
+            WHERE m.id = ? AND m.status = 'Aktif' AND r.status = 'Aktif'
+            LIMIT 1;
+        "#;
+        let result = self.query_one(sql, vec![json!(operator_id)]).await?;
+        let objects = result.to_objects();
+        let Some(row) = objects.first() else {
+            return Ok(None);
+        };
+        self.hydrate_operator(row, operator_id).await.map(Some)
+    }
 
-        let cursor_results = self
-            .execute_pipeline(vec![
-                Statement::new(
-                    "SELECT DISTINCT domain FROM sync_changelog WHERE id > ?;",
-                    vec![json!(last_revision.max(0))],
-                ),
-                Statement::new(
-                    "SELECT COALESCE(MAX(id), 0) AS max_rev FROM sync_changelog;",
-                    vec![],
-                ),
-            ])
-            .await?;
-        let queried_rev = cursor_results
-            .get(1)
-            .and_then(|result| result.to_objects().into_iter().next())
-            .and_then(|row| {
-                row.get("max_rev").and_then(|value| {
+    /// Membaca penghitung perubahan per tabel dari `sync_pulse`.
+    ///
+    /// `Ok(None)` berarti database cloud belum memiliki tabel/trigger pulse
+    /// (database lama). Pemanggil wajib memperlakukannya sebagai "semua tabel
+    /// berpotensi berubah" dan menarik snapshot penuh.
+    pub async fn fetch_sync_pulse(&self) -> Result<Option<HashMap<String, i64>>, CommandError> {
+        let Ok(result) = self
+            .query_one("SELECT table_name, revision FROM sync_pulse;", vec![])
+            .await
+        else {
+            return Ok(None);
+        };
+        let mut pulse = HashMap::with_capacity(SNAPSHOT_SOURCES.len());
+        for row in result.to_objects() {
+            let Some(table) = row.get("table_name").and_then(Value::as_str) else {
+                continue;
+            };
+            let revision = row
+                .get("revision")
+                .and_then(|value| {
                     value
                         .as_i64()
                         .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
                 })
-            })
-            .unwrap_or(0);
-        let max_rev = queried_rev.max(last_revision);
-
-        let mut selected_keys = HashSet::new();
-        if last_revision <= 0 {
-            selected_keys.extend(tables.iter().map(|(key, _)| *key));
-        } else {
-            for row in cursor_results
-                .first()
-                .map(|result| result.to_objects())
-                .unwrap_or_default()
-            {
-                let domain = row.get("domain").and_then(Value::as_str).unwrap_or("");
-                let keys: &[&str] = match domain {
-                    "employee" => &["employees"],
-                    "id-card" | "id_card" => &["idCards"],
-                    "shift" => &["shifts"],
-                    "holiday" => &["holidays"],
-                    "setting" => &["settings"],
-                    "company-profile" | "company_profile" => &["companyProfiles"],
-                    "id-card-template" | "id_card_template" => &["idCardTemplates"],
-                    "backup" | "backup_karyawan" => &["backups"],
-                    "correction" | "koreksi_admin" => &["corrections", "attendance", "scanLogs"],
-                    "offline-import" | "offline_import" | "import_offline" => {
-                        &["imports", "attendance", "scanLogs"]
-                    }
-                    "attendance" => &["attendance", "scanLogs"],
-                    "log-scan" | "log_scan" | "scan-log" | "scan_log" | "scan" => &["scanLogs"],
-                    // Domain baru/asing diperlakukan konservatif agar tidak ada data terlewat.
-                    _ => &[
-                        "employees",
-                        "idCards",
-                        "shifts",
-                        "holidays",
-                        "settings",
-                        "companyProfiles",
-                        "idCardTemplates",
-                        "backups",
-                        "corrections",
-                        "imports",
-                        "attendance",
-                        "scanLogs",
-                    ],
-                };
-                selected_keys.extend(keys.iter().copied());
-            }
+                .unwrap_or(0);
+            pulse.insert(table.to_owned(), revision);
         }
+        if pulse.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(pulse))
+    }
+
+    /// Menarik snapshot cloud. Bila `wanted` diisi, hanya tabel di dalamnya yang
+    /// dibaca — kunci payload tabel lain sengaja tidak dimunculkan sama sekali
+    /// agar `sync::apply_table` memperlakukannya sebagai "tidak dikirim" dan
+    /// melewatkannya (termasuk melewatkan penghapusan baris lokal).
+    pub async fn pull_snapshot_tables(
+        &self,
+        last_revision: i64,
+        wanted: Option<&HashSet<String>>,
+    ) -> Result<Value, CommandError> {
+        self.ensure_schema_current().await?;
+        let sources: Vec<&SnapshotSource> = SNAPSHOT_SOURCES
+            .iter()
+            .filter(|source| match wanted {
+                None => true,
+                Some(set) => set.contains(source.table),
+            })
+            .collect();
 
         let mut snapshot = json!({});
-        let selected_tables: Vec<_> = tables
-            .iter()
-            .filter(|(key, _)| selected_keys.contains(key))
-            .collect();
-        if !selected_tables.is_empty() {
-            let statements = selected_tables
+        let mut max_rev = last_revision;
+
+        if !sources.is_empty() {
+            let mut statements: Vec<Statement> = sources
                 .iter()
-                .map(|(_, sql)| Statement::new(*sql, vec![]))
+                .map(|source| Statement::new(source.sql, vec![]))
                 .collect();
+            statements.push(Statement::new(
+                "SELECT COALESCE(MAX(id), 0) AS max_rev FROM sync_changelog;",
+                vec![],
+            ));
+
             let results = self.execute_pipeline(statements).await?;
-            for (idx, (key, _)) in selected_tables.iter().enumerate() {
+            let rev_result = results.last().ok_or_else(CommandError::internal)?;
+            let queried_rev = rev_result
+                .to_objects()
+                .into_iter()
+                .next()
+                .and_then(|row| {
+                    row.get("max_rev").and_then(|value| {
+                        value
+                            .as_i64()
+                            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+                    })
+                })
+                .unwrap_or(0);
+            max_rev = queried_rev.max(last_revision);
+
+            for (idx, source) in sources.iter().enumerate() {
                 let res = results.get(idx).ok_or_else(CommandError::internal)?;
                 let rows_json: Vec<Value> =
                     res.to_objects().into_iter().map(|map| json!(map)).collect();
-                snapshot[*key] = json!(rows_json);
+                snapshot[source.payload_key] = json!(rows_json);
             }
         }
 
@@ -1590,7 +2543,117 @@ impl TursoClient {
                 created_at INTEGER NOT NULL
             );
         "#;
-        self.query_one(ensure_changelog_sql, vec![]).await?;
+
+        // Satu round-trip untuk seluruh batch: jaminan tabel changelog + pemetaan
+        // changelog dan receipt untuk semua event sekaligus. Sebelumnya setiap
+        // event menembak dua query terpisah secara berurutan, jadi satu batch 50
+        // event berarti 100+ request HTTP bolak-balik ke Turso.
+        let batch_event_ids: Vec<String> = events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .get("event_id")
+                    .or_else(|| event.get("eventId"))
+                    .and_then(Value::as_str)
+            })
+            .filter(|event_id| !event_id.is_empty())
+            .map(str::to_owned)
+            .collect();
+
+        let mut previous_events: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        let mut applied_receipts: HashSet<String> = HashSet::new();
+        if batch_event_ids.is_empty() {
+            self.query_one(ensure_changelog_sql, vec![]).await?;
+        } else {
+            let placeholders = vec!["?"; batch_event_ids.len()].join(", ");
+            let args: Vec<Value> = batch_event_ids.iter().map(|id| json!(id)).collect();
+            let prefetch = self
+                .execute_pipeline(vec![
+                    Statement::new(ensure_changelog_sql, vec![]),
+                    Statement::new(
+                        format!(
+                            "SELECT id, event_id, client_id, domain, operation, entity_key, payload_json FROM sync_changelog WHERE event_id IN ({placeholders});"
+                        ),
+                        args.clone(),
+                    ),
+                    Statement::new(
+                        format!(
+                            "SELECT event_id FROM sync_operation_receipt WHERE status = 'applied' AND event_id IN ({placeholders});"
+                        ),
+                        args,
+                    ),
+                ])
+                .await?;
+            if let Some(result) = prefetch.get(1) {
+                for row in result.to_objects() {
+                    let Some(event_id) = row
+                        .get("event_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    previous_events.insert(event_id, row);
+                }
+            }
+            if let Some(result) = prefetch.get(2) {
+                for row in result.to_objects() {
+                    if let Some(event_id) = row.get("event_id").and_then(Value::as_str) {
+                        applied_receipts.insert(event_id.to_owned());
+                    }
+                }
+            }
+        }
+
+        // Kondisi absensi cloud untuk seluruh batch, satu query. Dipakai menegakkan
+        // hierarki prioritas dan konkurensi optimistis sebelum baris ditimpa.
+        let mut attendance_guard: HashMap<String, AttendanceGuardRow> = HashMap::new();
+        let guarded_sessions: Vec<String> = events
+            .iter()
+            .filter_map(|event| {
+                let domain = event.get("domain").and_then(Value::as_str)?;
+                let operation = event.get("operation").and_then(Value::as_str)?;
+                let (domain, operation) = canonical_sync_route(domain, operation)?;
+                let payload = event
+                    .get("payload")
+                    .or_else(|| event.get("payload_json"))
+                    .or_else(|| event.get("payloadJson"))?;
+                attendance_session_of(domain, operation, payload)
+            })
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if !guarded_sessions.is_empty() {
+            let placeholders = vec!["?"; guarded_sessions.len()].join(", ");
+            let result = self
+                .query_one(
+                    format!(
+                        "SELECT id_sesi, sumber, update_terakhir FROM absensi_harian WHERE id_sesi IN ({placeholders});"
+                    ),
+                    guarded_sessions.iter().map(|id| json!(id)).collect(),
+                )
+                .await?;
+            for row in result.to_objects() {
+                let Some(id_sesi) = row.get("id_sesi").and_then(Value::as_str) else {
+                    continue;
+                };
+                attendance_guard.insert(
+                    id_sesi.to_owned(),
+                    AttendanceGuardRow {
+                        sumber: row
+                            .get("sumber")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        update_terakhir: row
+                            .get("update_terakhir")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    },
+                );
+            }
+        }
 
         for event in events {
             let event_id = event
@@ -1672,15 +2735,7 @@ impl TursoClient {
 
             // Receipt adalah sumber idempotensi event sukses. Changelog tanpa receipt
             // hanya mungkin berasal dari versi lama yang belum atomik.
-            let previous_event = self
-                .query_one(
-                    "SELECT id, client_id, domain, operation, entity_key, payload_json FROM sync_changelog WHERE event_id = ? LIMIT 1;",
-                    vec![json!(event_id)],
-                )
-                .await?
-                .to_objects()
-                .into_iter()
-                .next();
+            let previous_event = previous_events.get(event_id);
             if let Some(previous) = previous_event {
                 let previous_route = previous
                     .get("domain")
@@ -1713,24 +2768,7 @@ impl TursoClient {
                             "Revision event sinkronisasi tidak dapat ditentukan.",
                         )
                     })?;
-                let applied = self
-                    .query_one(
-                        "SELECT COUNT(*) AS total FROM sync_operation_receipt WHERE event_id = ? AND status = 'applied';",
-                        vec![json!(event_id)],
-                    )
-                    .await?
-                    .to_objects()
-                    .into_iter()
-                    .next()
-                    .and_then(|row| row.get("total").cloned())
-                    .and_then(|value| {
-                        value
-                            .as_i64()
-                            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-                    })
-                    .unwrap_or(0)
-                    > 0;
-                if applied {
+                if applied_receipts.contains(event_id) {
                     push_results.push(json!({
                         "eventId": event_id,
                         "status": "applied",
@@ -1750,6 +2788,25 @@ impl TursoClient {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or_default();
+
+            // Guard absensi dijalankan SEBELUM mutasi disusun, meniru urutan yang
+            // sudah dipakai jalur Web di `sync-push.ts`.
+            if let Err(error) = assert_attendance_precondition(
+                domain,
+                operation,
+                &parsed_payload,
+                attendance_session_of(domain, operation, &parsed_payload)
+                    .and_then(|id_sesi| attendance_guard.get(&id_sesi)),
+            ) {
+                push_results.push(json!({
+                    "eventId": event_id,
+                    "status": "conflict",
+                    "reason": error.message.clone(),
+                    "message": error.message,
+                    "serverRevision": 0
+                }));
+                continue;
+            }
 
             let collector = StatementCollector::default();
             if let Err(error) =
@@ -1821,7 +2878,7 @@ impl TursoClient {
                     receipt_json, created_at, processed_at
                 ) VALUES (?, ?, ?, ?, ?,
                     ?, (SELECT id FROM sync_changelog WHERE event_id = ?),
-                    'applied', ?, ?, 0, ?, ?, datetime('now'));"#,
+                    'applied', ?, ?, 0, ?, datetime('now'), datetime('now'));"#,
                 vec![
                     json!(event_id),
                     json!(client_id),
@@ -1833,7 +2890,6 @@ impl TursoClient {
                     json!(receipt.to_string()),
                     json!(base_revision),
                     json!(receipt.to_string()),
-                    json!(now_epoch),
                 ],
             ));
 
@@ -1961,14 +3017,28 @@ impl TursoClient {
         }
 
         let password_hash = hash_password_pbkdf2(password);
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or_default();
 
+        // Kolom warisan `role` WAJIB diisi: pada database yang di-provisioning
+        // dari Web ia `NOT NULL` dengan CHECK ('Admin','Operator','Scanner') dan
+        // tanpa DEFAULT, sehingga INSERT tanpa `role` selalu ditolak. Nilainya
+        // diturunkan dari `app_role` agar tetap konsisten dengan RBAC.
         let sql = r#"
-            INSERT INTO master_operator (kode_operator, nama_operator, username, password_hash, role_id, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            INSERT INTO master_operator (
+                kode_operator, nama_operator, username, password_hash,
+                role, role_id, status, created_at, updated_at
+            )
+            VALUES (
+                ?, ?, ?, ?,
+                COALESCE((
+                    SELECT CASE
+                        WHEN r.is_superadmin = 1 THEN 'Admin'
+                        WHEN LOWER(r.role_key) = 'admin' THEN 'Admin'
+                        WHEN LOWER(r.role_key) = 'scanner' THEN 'Scanner'
+                        ELSE 'Operator'
+                    END FROM app_role r WHERE r.id = ?
+                ), 'Operator'),
+                ?, ?, datetime('now'), datetime('now')
+            );
         "#;
 
         let res = self
@@ -1980,9 +3050,8 @@ impl TursoClient {
                     json!(username),
                     json!(password_hash),
                     json!(role_id),
+                    json!(role_id),
                     json!(status),
-                    json!(now_epoch),
-                    json!(now_epoch),
                 ],
             )
             .await?;
@@ -2435,6 +3504,9 @@ fn extract_attendance_row_params(row: &Value, id_sesi: &str) -> Vec<Value> {
         });
 
     vec![
+        // Nilai pertama mengisi kolom id_absensi lewat subquery pada klausa VALUES, sehingga
+        // upsert yang berakhir sebagai UPDATE tidak menghabiskan counter AUTOINCREMENT.
+        json!(id_sesi),
         json!(tanggal),
         json!(row.get("id_karyawan").and_then(Value::as_str).unwrap_or("")),
         json!(row.get("nama").and_then(Value::as_str).unwrap_or("")),
@@ -2490,6 +3562,41 @@ fn extract_attendance_row_params(row: &Value, id_sesi: &str) -> Vec<Value> {
         json!(row.get("id_karyawan_asal").and_then(Value::as_str)),
         json!(row.get("tanggal_tugas").and_then(Value::as_str)),
     ]
+}
+
+async fn insert_payroll_audit_log(
+    turso: &StatementCollector,
+    row: &Value,
+) -> Result<(), CommandError> {
+    let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+    let payroll_run_id = row
+        .get("payroll_run_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if id.is_empty() || payroll_run_id.is_empty() {
+        return Ok(());
+    }
+    turso
+        .query_one(
+            r#"
+            INSERT INTO payroll_audit_logs (
+                id, payroll_run_id, action, old_status, new_status, performed_by, notes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING;
+            "#,
+            vec![
+                json!(id),
+                json!(payroll_run_id),
+                json!(row.get("action").and_then(Value::as_str).unwrap_or("")),
+                json!(row.get("old_status").and_then(Value::as_str)),
+                json!(row.get("new_status").and_then(Value::as_str).unwrap_or("")),
+                json!(row.get("performed_by").and_then(Value::as_str).unwrap_or("")),
+                json!(row.get("notes").and_then(Value::as_str)),
+                json!(row.get("created_at").and_then(Value::as_str).unwrap_or("")),
+            ],
+        )
+        .await?;
+    Ok(())
 }
 
 async fn insert_log_if_missing(
@@ -2611,9 +3718,82 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("setting" | "settings" | "setting_gex_system" | "setting-gex-system", "update") => {
             ("setting", "update")
         }
+        ("payroll", "salary-config") => ("payroll", "salary-config"),
+        ("payroll", "overtime-rule") => ("payroll", "overtime-rule"),
+        ("payroll", "payroll-component") => ("payroll", "payroll-component"),
+        ("payroll", "tax-rule") => ("payroll", "tax-rule"),
+        ("payroll", "bpjs-rule") => ("payroll", "bpjs-rule"),
+        ("payroll", "delete") => ("payroll", "delete"),
+        ("payroll", "create-run") => ("payroll", "create-run"),
+        ("payroll", "transition-status") => ("payroll", "transition-status"),
         _ => return None,
     };
     sync::is_canonical_sync_route(route.0, route.1).then_some(route)
+}
+
+/// Kondisi baris absensi cloud saat batch push dimulai.
+struct AttendanceGuardRow {
+    sumber: String,
+    update_terakhir: String,
+}
+
+/// `id_sesi` absensi yang disentuh sebuah event, bila event-nya memang menulis absensi.
+fn attendance_session_of(domain: &str, operation: &str, payload: &Value) -> Option<String> {
+    let touches_attendance = matches!(
+        (domain, operation),
+        ("attendance", "scan") | ("correction", "create") | ("offline-import", "row")
+    );
+    if !touches_attendance {
+        return None;
+    }
+    payload
+        .get("attendance")
+        .and_then(|attendance| attendance.get("id_sesi"))
+        .and_then(Value::as_str)
+        .filter(|id_sesi| !id_sesi.is_empty())
+        .map(str::to_owned)
+}
+
+/// Menegakkan hierarki prioritas absensi dan pemeriksaan konkurensi optimistis.
+///
+/// Jalur HTTP Web sudah melakukan ini di `sync-push.ts`, tetapi jalur Turso
+/// 2-tier — yang justru dipakai Desktop dan Mobile — dulu menimpa `absensi_harian`
+/// tanpa syarat. Akibatnya scan terminal yang datang belakangan bisa menghapus
+/// Koreksi Admin, dan dua perangkat yang menyunting sesi yang sama saling
+/// menimpa diam-diam. `attendanceBaseUpdatedAt` sudah dikirim client dan
+/// divalidasi `sync-schema.ts`, hanya tidak pernah dibaca di sini.
+fn assert_attendance_precondition(
+    domain: &str,
+    operation: &str,
+    payload: &Value,
+    current: Option<&AttendanceGuardRow>,
+) -> Result<(), CommandError> {
+    if attendance_session_of(domain, operation, payload).is_none() {
+        return Ok(());
+    }
+    if let Some(row) = current {
+        if row.sumber == "Koreksi Admin" && domain != "correction" {
+            return Err(CommandError::new(
+                "TURSO_SYNC_ATTENDANCE_PROTECTED",
+                "Data absensi sudah dikoreksi admin dan tidak boleh ditimpa sumber lain.",
+            ));
+        }
+    }
+    let base = payload
+        .get("attendanceBaseUpdatedAt")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let stale = match current {
+        Some(row) => base.is_empty() || row.update_terakhir != base,
+        None => !base.is_empty(),
+    };
+    if stale {
+        return Err(CommandError::new(
+            "TURSO_SYNC_ATTENDANCE_STALE",
+            "Data absensi server berubah setelah event lokal dibuat.",
+        ));
+    }
+    Ok(())
 }
 
 async fn apply_event_to_turso(
@@ -2696,8 +3876,8 @@ async fn apply_event_to_turso(
                     .await?;
                 turso
                     .query_one(
-                        "INSERT OR IGNORE INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate) VALUES (?, ?, ?, 'Belum', date('now'));",
-                        vec![json!(id_unik), json!(nama), json!(divisi)],
+                        "INSERT INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate) SELECT ?, ?, ?, 'Belum', date('now') WHERE NOT EXISTS (SELECT 1 FROM id_card WHERE id_unik = ?);",
+                        vec![json!(id_unik), json!(nama), json!(divisi), json!(id_unik)],
                     )
                     .await?;
                 for (sql, args) in [
@@ -2801,8 +3981,8 @@ async fn apply_event_to_turso(
                     .await?;
                 turso
                     .query_one(
-                        "INSERT OR IGNORE INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate) VALUES (?, ?, ?, 'Belum', date('now'));",
-                        vec![json!(id_unik), json!(nama), json!(divisi)],
+                        "INSERT INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate) SELECT ?, ?, ?, 'Belum', date('now') WHERE NOT EXISTS (SELECT 1 FROM id_card WHERE id_unik = ?);",
+                        vec![json!(id_unik), json!(nama), json!(divisi), json!(id_unik)],
                     )
                     .await?;
             }
@@ -2871,10 +4051,10 @@ async fn apply_event_to_turso(
             if !id_unik.is_empty() {
                 let sql = r#"
                     INSERT INTO id_card (
-                        id_unik, nama, divisi, idcard_status, idcard_pdf_url,
+                        id_card_id, id_unik, nama, divisi, idcard_status, idcard_pdf_url,
                         idcard_last_generate, idcard_catatan, tanggal_generate, link_qr_png
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id_unik) DO UPDATE SET
+                    ) VALUES ((SELECT id_card_id FROM id_card WHERE id_unik = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id_card_id) DO UPDATE SET
                         nama = COALESCE(NULLIF(excluded.nama, ''), id_card.nama),
                         divisi = COALESCE(NULLIF(excluded.divisi, ''), id_card.divisi),
                         idcard_status = excluded.idcard_status,
@@ -2888,6 +4068,7 @@ async fn apply_event_to_turso(
                     .query_one(
                         sql,
                         vec![
+                            json!(id_unik),
                             json!(id_unik),
                             json!(row.get("nama").and_then(Value::as_str).unwrap_or("")),
                             json!(row.get("divisi").and_then(Value::as_str).unwrap_or("")),
@@ -2941,12 +4122,12 @@ async fn apply_event_to_turso(
             }
             let sql = r#"
                 INSERT INTO tbl_shift (
-                    kode_shift, nama_shift, jam_masuk, jam_pulang, awal_absen_menit,
+                    id_shift, kode_shift, nama_shift, jam_masuk, jam_pulang, awal_absen_menit,
                     batas_masuk_menit, toleransi_masuk_menit, jam_kerja_normal_menit,
                     istirahat_menit, batas_pulang_menit, offset_istirahat_mulai,
                     offset_generate_alfa, buffer_shift_malam_menit, izinkan_multi_sesi
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(kode_shift) DO UPDATE SET
+                ) VALUES ((SELECT id_shift FROM tbl_shift WHERE kode_shift = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id_shift) DO UPDATE SET
                     nama_shift = excluded.nama_shift,
                     jam_masuk = excluded.jam_masuk,
                     jam_pulang = excluded.jam_pulang,
@@ -2965,6 +4146,7 @@ async fn apply_event_to_turso(
                 .query_one(
                     sql,
                     vec![
+                        json!(kode_shift),
                         json!(kode_shift),
                         json!(row.get("nama_shift").and_then(Value::as_str).unwrap_or("")),
                         json!(row.get("jam_masuk").and_then(Value::as_str).unwrap_or("")),
@@ -3037,9 +4219,9 @@ async fn apply_event_to_turso(
             let tanggal = row.get("tanggal").and_then(Value::as_str).unwrap_or("");
             if !tanggal.is_empty() {
                 let sql = r#"
-                    INSERT INTO tbl_hari_libur (tanggal, nama_libur, jenis_libur, keterangan, status_aktif)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(tanggal) DO UPDATE SET
+                    INSERT INTO tbl_hari_libur (id_libur, tanggal, nama_libur, jenis_libur, keterangan, status_aktif)
+                    VALUES ((SELECT id_libur FROM tbl_hari_libur WHERE tanggal = ?), ?, ?, ?, ?, ?)
+                    ON CONFLICT(id_libur) DO UPDATE SET
                         nama_libur = excluded.nama_libur,
                         jenis_libur = excluded.jenis_libur,
                         keterangan = excluded.keterangan,
@@ -3049,6 +4231,7 @@ async fn apply_event_to_turso(
                     .query_one(
                         sql,
                         vec![
+                            json!(tanggal),
                             json!(tanggal),
                             json!(row.get("nama_libur").and_then(Value::as_str).unwrap_or("")),
                             json!(row.get("jenis_libur").and_then(Value::as_str).unwrap_or("")),
@@ -3087,13 +4270,13 @@ async fn apply_event_to_turso(
                     if !id_sesi.is_empty() {
                         let att_sql = r#"
                             INSERT INTO absensi_harian (
-                                tanggal, id_karyawan, nama, kelas_divisi, jam_masuk, jam_pulang,
+                                id_absensi, tanggal, id_karyawan, nama, kelas_divisi, jam_masuk, jam_pulang,
                                 status_kehadiran, status_absen, keterangan, sumber, update_terakhir,
                                 menit_terlambat, menit_datang_awal, jam_kerja, lembur,
                                 jam_kerja_kurang, id_shift, bulan, tahun, id_sesi, mode_tugas,
                                 id_backup, id_karyawan_asal, tanggal_tugas
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(id_sesi) DO UPDATE SET
+                            ) VALUES ((SELECT id_absensi FROM absensi_harian WHERE id_sesi = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(id_absensi) DO UPDATE SET
                                 tanggal = excluded.tanggal,
                                 id_karyawan = excluded.id_karyawan,
                                 nama = excluded.nama,
@@ -3134,13 +4317,13 @@ async fn apply_event_to_turso(
             if !id_sesi.is_empty() {
                 let sql = r#"
                     INSERT INTO absensi_harian (
-                        tanggal, id_karyawan, nama, kelas_divisi, jam_masuk, jam_pulang,
+                        id_absensi, tanggal, id_karyawan, nama, kelas_divisi, jam_masuk, jam_pulang,
                         status_kehadiran, status_absen, keterangan, sumber, update_terakhir,
                         menit_terlambat, menit_datang_awal, jam_kerja, lembur,
                         jam_kerja_kurang, id_shift, bulan, tahun, id_sesi, mode_tugas,
                         id_backup, id_karyawan_asal, tanggal_tugas
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id_sesi) DO UPDATE SET
+                    ) VALUES ((SELECT id_absensi FROM absensi_harian WHERE id_sesi = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id_absensi) DO UPDATE SET
                         tanggal = COALESCE(NULLIF(excluded.tanggal, ''), absensi_harian.tanggal),
                         id_karyawan = COALESCE(NULLIF(excluded.id_karyawan, ''), absensi_harian.id_karyawan),
                         nama = COALESCE(NULLIF(excluded.nama, ''), absensi_harian.nama),
@@ -3322,10 +4505,10 @@ async fn apply_event_to_turso(
             if !id_referensi.is_empty() {
                 let sql = r#"
                     INSERT INTO koreksi_admin (
-                        id_referensi, tanggal, id_karyawan, nama, divisi, jenis_koreksi,
+                        id_koreksi, id_referensi, tanggal, id_karyawan, nama, divisi, jenis_koreksi,
                         jam_koreksi, keterangan_admin, status_proses, timestamp, kode_operator
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id_referensi) DO UPDATE SET
+                    ) VALUES ((SELECT id_koreksi FROM koreksi_admin WHERE id_referensi = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id_koreksi) DO UPDATE SET
                         tanggal = excluded.tanggal,
                         jenis_koreksi = excluded.jenis_koreksi,
                         jam_koreksi = excluded.jam_koreksi,
@@ -3338,6 +4521,7 @@ async fn apply_event_to_turso(
                     .query_one(
                         sql,
                         vec![
+                            json!(id_referensi),
                             json!(id_referensi),
                             json!(row.get("tanggal").and_then(Value::as_str).unwrap_or("")),
                             json!(row.get("id_karyawan").and_then(Value::as_str).unwrap_or("")),
@@ -3370,13 +4554,13 @@ async fn apply_event_to_turso(
                     if !id_sesi.is_empty() {
                         let att_sql = r#"
                             INSERT INTO absensi_harian (
-                                tanggal, id_karyawan, nama, kelas_divisi, jam_masuk, jam_pulang,
+                                id_absensi, tanggal, id_karyawan, nama, kelas_divisi, jam_masuk, jam_pulang,
                                 status_kehadiran, status_absen, keterangan, sumber, update_terakhir,
                                 menit_terlambat, menit_datang_awal, jam_kerja, lembur,
                                 jam_kerja_kurang, id_shift, bulan, tahun, id_sesi, mode_tugas,
                                 id_backup, id_karyawan_asal, tanggal_tugas
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(id_sesi) DO UPDATE SET
+                            ) VALUES ((SELECT id_absensi FROM absensi_harian WHERE id_sesi = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(id_absensi) DO UPDATE SET
                                 tanggal = excluded.tanggal,
                                 id_karyawan = excluded.id_karyawan,
                                 nama = excluded.nama,
@@ -3449,11 +4633,11 @@ async fn apply_event_to_turso(
                     .unwrap_or("");
                 let sql = r#"
                     INSERT INTO import_offline (
-                        event_key, timestamp_input, tanggal, id_unik, nama, divisi,
+                        id_import, event_key, timestamp_input, tanggal, id_unik, nama, divisi,
                         jam_masuk, jam_pulang, status_kehadiran, status_absen,
                         keterangan, status_proses, diproses_pada, pesan_error, kode_operator
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Sudah Diproses', datetime('now'), '', ?)
-                    ON CONFLICT(event_key) DO UPDATE SET
+                    ) VALUES ((SELECT id_import FROM import_offline WHERE event_key = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Sudah Diproses', datetime('now'), '', ?)
+                    ON CONFLICT(id_import) DO UPDATE SET
                         timestamp_input = COALESCE(NULLIF(excluded.timestamp_input, ''), import_offline.timestamp_input),
                         tanggal = excluded.tanggal,
                         id_unik = excluded.id_unik,
@@ -3473,6 +4657,7 @@ async fn apply_event_to_turso(
                     .query_one(
                         sql,
                         vec![
+                            json!(event_key),
                             json!(event_key),
                             json!(row
                                 .get("timestamp_input")
@@ -3500,13 +4685,13 @@ async fn apply_event_to_turso(
                     if !id_sesi.is_empty() {
                         let att_sql = r#"
                             INSERT INTO absensi_harian (
-                                tanggal, id_karyawan, nama, kelas_divisi, jam_masuk, jam_pulang,
+                                id_absensi, tanggal, id_karyawan, nama, kelas_divisi, jam_masuk, jam_pulang,
                                 status_kehadiran, status_absen, keterangan, sumber, update_terakhir,
                                 menit_terlambat, menit_datang_awal, jam_kerja, lembur,
                                 jam_kerja_kurang, id_shift, bulan, tahun, id_sesi, mode_tugas,
                                 id_backup, id_karyawan_asal, tanggal_tugas
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(id_sesi) DO UPDATE SET
+                            ) VALUES ((SELECT id_absensi FROM absensi_harian WHERE id_sesi = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(id_absensi) DO UPDATE SET
                                 tanggal = excluded.tanggal,
                                 id_karyawan = excluded.id_karyawan,
                                 nama = excluded.nama,
@@ -3742,6 +4927,346 @@ async fn apply_event_to_turso(
                 turso.query_one(sql, vec![json!(key), json!(value)]).await?;
             }
         }
+        ("payroll", "salary-config") => {
+            let row = payload.get("salaryConfig").unwrap_or(payload);
+            let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+            if !id.is_empty() {
+                let sql = r#"
+                    INSERT INTO salary_configs (
+                        id, id_karyawan, rate_per_hour, ptkp_status, effective_date, created_by, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id_karyawan, effective_date) DO UPDATE SET
+                        rate_per_hour = excluded.rate_per_hour,
+                        ptkp_status = excluded.ptkp_status,
+                        created_by = excluded.created_by;
+                "#;
+                turso
+                    .query_one(
+                        sql,
+                        vec![
+                            json!(id),
+                            json!(row.get("id_karyawan").and_then(Value::as_str).unwrap_or("")),
+                            json!(row.get("rate_per_hour").and_then(Value::as_i64).unwrap_or(0)),
+                            json!(row
+                                .get("ptkp_status")
+                                .and_then(Value::as_str)
+                                .unwrap_or("TK/0")),
+                            json!(row
+                                .get("effective_date")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")),
+                            json!(row.get("created_by").and_then(Value::as_str).unwrap_or("")),
+                            json!(row.get("created_at").and_then(Value::as_str).unwrap_or("")),
+                        ],
+                    )
+                    .await?;
+            }
+        }
+        ("payroll", "overtime-rule") => {
+            let row = payload.get("overtimeRule").unwrap_or(payload);
+            let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+            if !id.is_empty() {
+                let sql = r#"
+                    INSERT INTO overtime_tier_rules (
+                        id, rule_type, tier_order, hour_start, hour_end, multiplier, is_active
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(rule_type, tier_order) DO UPDATE SET
+                        hour_start = excluded.hour_start,
+                        hour_end = excluded.hour_end,
+                        multiplier = excluded.multiplier,
+                        is_active = excluded.is_active;
+                "#;
+                turso
+                    .query_one(
+                        sql,
+                        vec![
+                            json!(id),
+                            json!(row.get("rule_type").and_then(Value::as_str).unwrap_or("")),
+                            json!(row.get("tier_order").and_then(Value::as_i64).unwrap_or(0)),
+                            json!(row.get("hour_start").and_then(Value::as_f64).unwrap_or(0.0)),
+                            json!(row.get("hour_end").and_then(Value::as_f64)),
+                            json!(row.get("multiplier").and_then(Value::as_f64).unwrap_or(1.0)),
+                            json!(row.get("is_active").and_then(Value::as_i64).unwrap_or(1)),
+                        ],
+                    )
+                    .await?;
+            }
+        }
+        ("payroll", "payroll-component") => {
+            let row = payload.get("component").unwrap_or(payload);
+            let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+            if !id.is_empty() {
+                let sql = r#"
+                    INSERT INTO payroll_components (
+                        id, name, category, calc_type, default_value, applies_to, is_active
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        category = excluded.category,
+                        calc_type = excluded.calc_type,
+                        default_value = excluded.default_value,
+                        applies_to = excluded.applies_to,
+                        is_active = excluded.is_active;
+                "#;
+                turso
+                    .query_one(
+                        sql,
+                        vec![
+                            json!(id),
+                            json!(row.get("name").and_then(Value::as_str).unwrap_or("")),
+                            json!(row.get("category").and_then(Value::as_str).unwrap_or("")),
+                            json!(row.get("calc_type").and_then(Value::as_str).unwrap_or("")),
+                            json!(row
+                                .get("default_value")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0)),
+                            json!(row
+                                .get("applies_to")
+                                .and_then(Value::as_str)
+                                .unwrap_or("ALL")),
+                            json!(row.get("is_active").and_then(Value::as_i64).unwrap_or(1)),
+                        ],
+                    )
+                    .await?;
+            }
+        }
+        ("payroll", "tax-rule") => {
+            let row = payload.get("taxRule").unwrap_or(payload);
+            let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+            if !id.is_empty() {
+                let sql = r#"
+                    INSERT INTO tax_rules (
+                        id, category, bracket_min, bracket_max, rate_percentage, effective_date
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        category = excluded.category,
+                        bracket_min = excluded.bracket_min,
+                        bracket_max = excluded.bracket_max,
+                        rate_percentage = excluded.rate_percentage,
+                        effective_date = excluded.effective_date;
+                "#;
+                turso
+                    .query_one(
+                        sql,
+                        vec![
+                            json!(id),
+                            json!(row.get("category").and_then(Value::as_str).unwrap_or("")),
+                            json!(row.get("bracket_min").and_then(Value::as_i64).unwrap_or(0)),
+                            json!(row.get("bracket_max").and_then(Value::as_i64)),
+                            json!(row
+                                .get("rate_percentage")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0)),
+                            json!(row
+                                .get("effective_date")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")),
+                        ],
+                    )
+                    .await?;
+            }
+        }
+        ("payroll", "bpjs-rule") => {
+            let row = payload.get("bpjsRule").unwrap_or(payload);
+            let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+            if !id.is_empty() {
+                let sql = r#"
+                    INSERT INTO bpjs_rules (
+                        id, component_code, component_name, rate_percentage, wage_cap, effective_date
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(component_code) DO UPDATE SET
+                        component_name = excluded.component_name,
+                        rate_percentage = excluded.rate_percentage,
+                        wage_cap = excluded.wage_cap,
+                        effective_date = excluded.effective_date;
+                "#;
+                turso
+                    .query_one(
+                        sql,
+                        vec![
+                            json!(id),
+                            json!(row
+                                .get("component_code")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")),
+                            json!(row
+                                .get("component_name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")),
+                            json!(row
+                                .get("rate_percentage")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0)),
+                            json!(row.get("wage_cap").and_then(Value::as_i64)),
+                            json!(row
+                                .get("effective_date")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")),
+                        ],
+                    )
+                    .await?;
+            }
+        }
+        ("payroll", "delete") => {
+            const DELETABLE_TABLES: &[&str] = &[
+                "salary_configs",
+                "overtime_tier_rules",
+                "payroll_components",
+                "tax_rules",
+                "bpjs_rules",
+            ];
+            let table = payload.get("table").and_then(Value::as_str).unwrap_or("");
+            let id = payload.get("id").and_then(Value::as_str).unwrap_or("");
+            if !id.is_empty() && DELETABLE_TABLES.contains(&table) {
+                let sql = format!("DELETE FROM {table} WHERE id = ?;");
+                turso.query_one(&sql, vec![json!(id)]).await?;
+            }
+        }
+        ("payroll", "create-run") => {
+            let run = payload.get("run").unwrap_or(payload);
+            let run_id = run.get("id").and_then(Value::as_str).unwrap_or("");
+            if run_id.is_empty() {
+                return Ok(());
+            }
+            let run_sql = r#"
+                INSERT INTO payroll_runs (
+                    id, idempotency_key, period_start, period_end, status,
+                    total_gross_payout, total_net_payout, total_employees,
+                    created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING;
+            "#;
+            turso
+                .query_one(
+                    run_sql,
+                    vec![
+                        json!(run_id),
+                        json!(run
+                            .get("idempotency_key")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")),
+                        json!(run.get("period_start").and_then(Value::as_str).unwrap_or("")),
+                        json!(run.get("period_end").and_then(Value::as_str).unwrap_or("")),
+                        json!(run.get("status").and_then(Value::as_str).unwrap_or("DRAFT")),
+                        json!(run
+                            .get("total_gross_payout")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0)),
+                        json!(run
+                            .get("total_net_payout")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0)),
+                        json!(run
+                            .get("total_employees")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0)),
+                        json!(run.get("created_by").and_then(Value::as_str).unwrap_or("")),
+                        json!(run.get("created_at").and_then(Value::as_str).unwrap_or("")),
+                        json!(run.get("updated_at").and_then(Value::as_str).unwrap_or("")),
+                    ],
+                )
+                .await?;
+
+            if let Some(items) = payload.get("items").and_then(Value::as_array) {
+                let item_sql = r#"
+                    INSERT INTO payroll_items (
+                        id, payroll_run_id, id_karyawan, nama_karyawan, divisi, ptkp_status,
+                        total_regular_hours, total_overtime_hours, total_overtime_index,
+                        rate_per_hour, basic_salary, overtime_salary, gross_salary,
+                        total_allowances, total_deductions, bpjs_employee_total, bpjs_company_total,
+                        pph21_amount, net_salary, breakdown_snapshot, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO NOTHING;
+                "#;
+                for item in items {
+                    let item_id = item.get("id").and_then(Value::as_str).unwrap_or("");
+                    if item_id.is_empty() {
+                        continue;
+                    }
+                    turso
+                        .query_one(
+                            item_sql,
+                            vec![
+                                json!(item_id),
+                                json!(run_id),
+                                json!(item.get("id_karyawan").and_then(Value::as_str).unwrap_or("")),
+                                json!(item
+                                    .get("nama_karyawan")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")),
+                                json!(item.get("divisi").and_then(Value::as_str).unwrap_or("")),
+                                json!(item
+                                    .get("ptkp_status")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("TK/0")),
+                                json!(item
+                                    .get("total_regular_hours")
+                                    .and_then(Value::as_f64)
+                                    .unwrap_or(0.0)),
+                                json!(item
+                                    .get("total_overtime_hours")
+                                    .and_then(Value::as_f64)
+                                    .unwrap_or(0.0)),
+                                json!(item
+                                    .get("total_overtime_index")
+                                    .and_then(Value::as_f64)
+                                    .unwrap_or(0.0)),
+                                json!(item.get("rate_per_hour").and_then(Value::as_i64).unwrap_or(0)),
+                                json!(item.get("basic_salary").and_then(Value::as_i64).unwrap_or(0)),
+                                json!(item
+                                    .get("overtime_salary")
+                                    .and_then(Value::as_i64)
+                                    .unwrap_or(0)),
+                                json!(item.get("gross_salary").and_then(Value::as_i64).unwrap_or(0)),
+                                json!(item
+                                    .get("total_allowances")
+                                    .and_then(Value::as_i64)
+                                    .unwrap_or(0)),
+                                json!(item
+                                    .get("total_deductions")
+                                    .and_then(Value::as_i64)
+                                    .unwrap_or(0)),
+                                json!(item
+                                    .get("bpjs_employee_total")
+                                    .and_then(Value::as_i64)
+                                    .unwrap_or(0)),
+                                json!(item
+                                    .get("bpjs_company_total")
+                                    .and_then(Value::as_i64)
+                                    .unwrap_or(0)),
+                                json!(item.get("pph21_amount").and_then(Value::as_i64).unwrap_or(0)),
+                                json!(item.get("net_salary").and_then(Value::as_i64).unwrap_or(0)),
+                                json!(item
+                                    .get("breakdown_snapshot")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("{}")),
+                                json!(item.get("created_at").and_then(Value::as_str).unwrap_or("")),
+                            ],
+                        )
+                        .await?;
+                }
+            }
+
+            if let Some(audit) = payload.get("audit") {
+                insert_payroll_audit_log(turso, audit).await?;
+            }
+        }
+        ("payroll", "transition-status") => {
+            let run_id = payload.get("id").and_then(Value::as_str).unwrap_or("");
+            let status = payload.get("status").and_then(Value::as_str).unwrap_or("");
+            let updated_at = payload.get("updated_at").and_then(Value::as_str).unwrap_or("");
+            if !run_id.is_empty() && !status.is_empty() {
+                turso
+                    .query_one(
+                        "UPDATE payroll_runs SET status = ?, updated_at = ? WHERE id = ?;",
+                        vec![json!(status), json!(updated_at), json!(run_id)],
+                    )
+                    .await?;
+            }
+            if let Some(audit) = payload.get("audit") {
+                insert_payroll_audit_log(turso, audit).await?;
+            }
+        }
         _ => {
             return Err(CommandError::new(
                 "TURSO_SYNC_OPERATION_UNSUPPORTED",
@@ -3877,20 +5402,136 @@ mod tests {
 
     #[test]
     fn test_normalize_turso_url() {
+        let turso = |raw: &str| normalize_database_url(raw, DatabaseProvider::Turso, false);
         assert_eq!(
-            normalize_turso_url("libsql://my-db.turso.io")
-                .unwrap()
-                .as_str(),
+            turso("libsql://my-db.turso.io").unwrap().as_str(),
             "https://my-db.turso.io/"
         );
         assert_eq!(
-            normalize_turso_url("https://my-db.turso.io/path?query=1")
-                .unwrap()
-                .as_str(),
+            turso("https://my-db.turso.io/path?query=1").unwrap().as_str(),
             "https://my-db.turso.io/"
         );
-        assert!(normalize_turso_url("ftp://my-db.turso.io").is_err());
-        assert!(normalize_turso_url("").is_err());
+        assert!(turso("ftp://my-db.turso.io").is_err());
+        assert!(turso("").is_err());
+    }
+
+    #[test]
+    fn self_hosted_allows_plain_http_on_private_networks() {
+        // Justru inilah tujuan mode server sendiri: server libSQL di LAN kantor
+        // atau di rumah yang berjalan tanpa TLS. Ini harus lolos pada build
+        // rilis, bukan hanya pada build debug.
+        for address in [
+            "http://192.168.1.10:8080",
+            "http://10.20.30.40:8080",
+            "http://172.16.5.4:8080",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://nas.local:8080",
+            "ws://192.168.1.10:8080",
+        ] {
+            assert!(
+                normalize_database_url(address, DatabaseProvider::SelfHosted, false).is_ok(),
+                "alamat privat harus diterima: {address}"
+            );
+        }
+    }
+
+    #[test]
+    fn self_hosted_rejects_plain_http_on_public_hosts_unless_opted_in() {
+        // VPS berisi IP publik: HTTP polos di sana mengirim Auth Token dan data
+        // absensi tanpa enkripsi, jadi harus ditolak sampai pengguna menyatakan
+        // menerima risikonya secara eksplisit.
+        let error = normalize_database_url("http://203.0.113.10:8080", DatabaseProvider::SelfHosted, false)
+            .expect_err("host publik ber-HTTP harus ditolak tanpa opt-in");
+        assert_eq!(error.code, "TURSO_URL_INSECURE");
+        assert!(
+            normalize_database_url("http://203.0.113.10:8080", DatabaseProvider::SelfHosted, true)
+                .is_ok()
+        );
+        // Opt-in tidak boleh menular ke provider Turso terkelola.
+        assert!(normalize_database_url("http://203.0.113.10:8080", DatabaseProvider::Turso, true).is_err());
+    }
+
+    #[test]
+    fn self_hosted_keeps_custom_port_and_strips_path() {
+        let url = normalize_database_url(
+            "http://192.168.1.10:9000/some/path?x=1#frag",
+            DatabaseProvider::SelfHosted,
+            false,
+        )
+        .unwrap();
+        assert_eq!(url.as_str(), "http://192.168.1.10:9000/");
+    }
+
+    #[test]
+    fn database_url_never_carries_credentials() {
+        for provider in [DatabaseProvider::Turso, DatabaseProvider::SelfHosted] {
+            assert!(
+                normalize_database_url("https://user:secret@db.example.com", provider, false)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn auth_token_is_optional_only_where_it_is_safe() {
+        // sqld di LAN lazim berjalan tanpa autentikasi sama sekali.
+        let lan = TursoConfig::new(
+            "http://192.168.1.10:8080".into(),
+            String::new(),
+            DatabaseProvider::SelfHosted,
+            false,
+        );
+        assert!(!lan.requires_auth_token());
+        assert!(TursoClient::from_config(&lan, Client::new()).is_ok());
+
+        // Server sendiri yang sudah ber-HTTPS publik berarti terekspos internet:
+        // token menjadi satu-satunya penghalang yang tersisa.
+        let public = TursoConfig::new(
+            "https://db.kantor-anda.com".into(),
+            String::new(),
+            DatabaseProvider::SelfHosted,
+            false,
+        );
+        assert!(public.requires_auth_token());
+        assert!(TursoClient::from_config(&public, Client::new()).is_err());
+
+        // Turso terkelola selalu wajib token.
+        let turso = TursoConfig::turso("libsql://my-db.turso.io".into(), String::new());
+        assert!(turso.requires_auth_token());
+        assert!(TursoClient::from_config(&turso, Client::new()).is_err());
+    }
+
+    #[test]
+    fn matches_url_compares_normalized_spellings() {
+        let config = TursoConfig::turso("libsql://my-db.turso.io".into(), "token".into());
+        assert!(config.matches_url("https://my-db.turso.io"));
+        assert!(config.matches_url("https://my-db.turso.io/"));
+        assert!(config.matches_url("  libsql://my-db.turso.io  "));
+        assert!(!config.matches_url("https://other-db.turso.io"));
+    }
+
+    #[test]
+    fn insecure_flag_is_dropped_outside_self_hosted_mode() {
+        let config = TursoConfig::new(
+            "libsql://my-db.turso.io".into(),
+            "token".into(),
+            DatabaseProvider::Turso,
+            true,
+        );
+        assert!(!config.allow_insecure_transport);
+    }
+
+    #[test]
+    fn legacy_vault_payload_defaults_to_turso_provider() {
+        // Vault yang ditulis versi lama hanya memuat dua field. Kalau default-nya
+        // tidak Turso, seluruh instalasi lama akan gagal memuat konfigurasi.
+        let config: TursoConfig = serde_json::from_str(
+            r#"{"database_url":"libsql://my-db.turso.io","auth_token":"token"}"#,
+        )
+        .unwrap();
+        assert_eq!(config.provider, DatabaseProvider::Turso);
+        assert!(!config.allow_insecure_transport);
     }
 
     #[test]
@@ -3973,8 +5614,8 @@ mod tests {
             "bulan": "Agustus"
         });
         let params_int = extract_attendance_row_params(&att_int, "SESI001");
-        assert_eq!(params_int[17], json!("Agustus"));
-        assert_eq!(params_int[18], json!(2026));
+        assert_eq!(params_int[18], json!("Agustus"));
+        assert_eq!(params_int[19], json!(2026));
 
         let att_str = json!({
             "tanggal": "2026-08-22",
@@ -3983,8 +5624,8 @@ mod tests {
             "tahun": "2026"
         });
         let params_str = extract_attendance_row_params(&att_str, "SESI001");
-        assert_eq!(params_str[17], json!("Agustus"));
-        assert_eq!(params_str[18], json!(2026));
+        assert_eq!(params_str[18], json!("Agustus"));
+        assert_eq!(params_str[19], json!(2026));
 
         let att_empty = json!({
             "tanggal": "2026-08-22",
@@ -3992,7 +5633,78 @@ mod tests {
             "nama": "Budi"
         });
         let params_empty = extract_attendance_row_params(&att_empty, "SESI001");
-        assert_eq!(params_empty[17], json!("Agustus"));
-        assert_eq!(params_empty[18], json!(2026));
+        assert_eq!(params_empty[18], json!("Agustus"));
+        assert_eq!(params_empty[19], json!(2026));
+    }
+
+    #[test]
+    fn scan_tidak_boleh_menimpa_koreksi_admin_di_jalur_turso() {
+        let payload = json!({
+            "attendance": { "id_sesi": "SESI-1" },
+            "attendanceBaseUpdatedAt": "2026-08-10 07:30:00"
+        });
+        let dikoreksi = AttendanceGuardRow {
+            sumber: "Koreksi Admin".into(),
+            update_terakhir: "2026-08-10 07:30:00".into(),
+        };
+
+        // Scanner terminal berada di bawah Koreksi Admin pada hierarki prioritas.
+        let ditolak =
+            assert_attendance_precondition("attendance", "scan", &payload, Some(&dikoreksi));
+        assert_eq!(
+            ditolak.unwrap_err().code,
+            "TURSO_SYNC_ATTENDANCE_PROTECTED"
+        );
+
+        // Import offline juga tidak boleh menimpa koreksi admin.
+        assert!(
+            assert_attendance_precondition("offline-import", "row", &payload, Some(&dikoreksi))
+                .is_err()
+        );
+
+        // Koreksi admin berikutnya tetap boleh menulis.
+        assert!(
+            assert_attendance_precondition("correction", "create", &payload, Some(&dikoreksi))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn event_absensi_basi_ditolak_sebagai_konflik() {
+        let payload = json!({
+            "attendance": { "id_sesi": "SESI-1" },
+            "attendanceBaseUpdatedAt": "2026-08-10 07:30:00"
+        });
+        let berubah = AttendanceGuardRow {
+            sumber: "Scanner".into(),
+            update_terakhir: "2026-08-10 09:00:00".into(),
+        };
+        assert_eq!(
+            assert_attendance_precondition("attendance", "scan", &payload, Some(&berubah))
+                .unwrap_err()
+                .code,
+            "TURSO_SYNC_ATTENDANCE_STALE"
+        );
+
+        // Basis sama: boleh lanjut.
+        let sama = AttendanceGuardRow {
+            sumber: "Scanner".into(),
+            update_terakhir: "2026-08-10 07:30:00".into(),
+        };
+        assert!(
+            assert_attendance_precondition("attendance", "scan", &payload, Some(&sama)).is_ok()
+        );
+
+        // Baris belum ada dan client tidak mengirim basis: sesi baru, boleh lanjut.
+        let baru = json!({ "attendance": { "id_sesi": "SESI-2" } });
+        assert!(assert_attendance_precondition("attendance", "scan", &baru, None).is_ok());
+
+        // Client mengira ada basis padahal baris sudah hilang: konflik.
+        assert!(assert_attendance_precondition("attendance", "scan", &payload, None).is_err());
+
+        // Domain yang tidak menyentuh absensi tidak terpengaruh guard ini.
+        assert!(
+            assert_attendance_precondition("employee", "update", &payload, Some(&berubah)).is_ok()
+        );
     }
 }

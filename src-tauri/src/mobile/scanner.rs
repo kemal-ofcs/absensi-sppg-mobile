@@ -1374,13 +1374,13 @@ fn submit_internal(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Mutex, RwLock};
 
     use reqwest::Client;
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{storage, submit_at, LocalMoment, MobileState};
+    use super::{storage, submit_at, MobileState, LocalMoment};
 
     fn fixture() -> (tempfile::TempDir, MobileState) {
         let directory = tempdir().expect("temporary directory");
@@ -1410,11 +1410,11 @@ mod tests {
             )
             .expect("fixture seed");
         let state = MobileState {
-            server_origin: std::sync::RwLock::new("http://localhost:3000".into()),
+            server_origin: RwLock::new("http://localhost:3000".to_string()),
             offline_max_age_hours: 24,
             data_dir: directory.path().to_path_buf(),
             http: Client::new(),
-            turso_config: std::sync::RwLock::new(None),
+            turso_config: RwLock::new(None),
             session: Mutex::new(None),
             vault_lock: Mutex::new(()),
         };

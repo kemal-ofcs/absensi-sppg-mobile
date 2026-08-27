@@ -11,7 +11,11 @@ import {
   clearFailedSync,
   getSyncConflicts,
   getSyncStatus,
+  resolveSyncConflicts,
+  resolveSyncConflictsLocal,
   retryFailedSync,
+  SYNC_COMPLETED_EVENT,
+  SYNC_FAILED_EVENT,
   syncNow,
 } from "@/lib/gateways/sync-status";
 
@@ -20,7 +24,7 @@ export default function SyncPage() {
   const router = useRouter();
 
   const [status, setStatus] = useState<SyncStatus | null>(null);
-  const [_conflicts, setConflicts] = useState<SyncConflict[]>([]);
+  const [conflicts, setConflicts] = useState<SyncConflict[]>([]);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [message, setMessage] = useState<string>("");
 
@@ -47,6 +51,29 @@ export default function SyncPage() {
     }
   }, [isAuthenticated, loadStatus]);
 
+  // Ikuti hasil auto-sync latar. Sebelumnya kegagalan auto-sync ditelan diam-diam,
+  // jadi halaman ini bisa memperlihatkan angka lama tanpa petunjuk apa pun bahwa
+  // sinkronisasi sedang mati.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const onCompleted = (event: Event) => {
+      const detail = (event as CustomEvent<SyncStatus>).detail;
+      if (detail) setStatus(detail);
+      if (detail && !detail.pushError) setMessage("");
+      void loadStatus();
+    };
+    const onFailed = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: string }>).detail;
+      setMessage(detail?.message ?? "Sinkronisasi otomatis gagal.");
+    };
+    window.addEventListener(SYNC_COMPLETED_EVENT, onCompleted);
+    window.addEventListener(SYNC_FAILED_EVENT, onFailed);
+    return () => {
+      window.removeEventListener(SYNC_COMPLETED_EVENT, onCompleted);
+      window.removeEventListener(SYNC_FAILED_EVENT, onFailed);
+    };
+  }, [isAuthenticated, loadStatus]);
+
   const handleSyncNow = async () => {
     if (isSyncing) return;
     setIsSyncing(true);
@@ -56,8 +83,16 @@ export default function SyncPage() {
     try {
       const newStatus = await syncNow();
       setStatus(newStatus);
-      triggerHaptic("success");
-      setMessage("Sinkronisasi data berhasil diselesaikan.");
+      if (newStatus?.pushError) {
+        // Pull berhasil tetapi antrean keluar belum terkirim.
+        triggerHaptic("error");
+        setMessage(
+          `Data cloud berhasil ditarik, tetapi antrean kirim gagal: ${newStatus.pushError}`,
+        );
+      } else {
+        triggerHaptic("success");
+        setMessage("Sinkronisasi data berhasil diselesaikan.");
+      }
     } catch (err: unknown) {
       triggerHaptic("error");
       setMessage(err instanceof Error ? err.message : "Sinkronisasi gagal.");
@@ -74,6 +109,46 @@ export default function SyncPage() {
       await handleSyncNow();
     } catch {
       // Handled
+    }
+  };
+
+  const handleResolveConflicts = async (eventId?: string) => {
+    triggerHaptic("light");
+    try {
+      await resolveSyncConflicts(eventId);
+      triggerHaptic("success");
+      setMessage(
+        eventId
+          ? "Konflik diselesaikan (mengikuti master cloud)."
+          : "Semua konflik diselesaikan (mengikuti master cloud).",
+      );
+      await loadStatus();
+    } catch (err: unknown) {
+      triggerHaptic("error");
+      setMessage(
+        err instanceof Error ? err.message : "Gagal menyelesaikan konflik.",
+      );
+    }
+  };
+
+  const handleResolveConflictsLocal = async (eventId?: string) => {
+    triggerHaptic("light");
+    try {
+      await resolveSyncConflictsLocal(eventId);
+      triggerHaptic("success");
+      setMessage(
+        eventId
+          ? "Data lokal diprioritaskan dan dikirim ke cloud."
+          : "Semua data lokal diprioritaskan dan dikirim ke cloud.",
+      );
+      await loadStatus();
+    } catch (err: unknown) {
+      triggerHaptic("error");
+      setMessage(
+        err instanceof Error
+          ? err.message
+          : "Gagal memprioritaskan data lokal.",
+      );
     }
   };
 
@@ -194,6 +269,72 @@ export default function SyncPage() {
             </p>
           </div>
         </div>
+
+        {/* Conflict Actions & Review Card */}
+        {conflicts.length > 0 && (
+          <div className="rounded-3xl border border-amber-400/20 bg-amber-400/5 p-4 space-y-3">
+            <div className="flex flex-col gap-2">
+              <div>
+                <h3 className="text-sm font-black text-amber-200">
+                  Konflik Perlu Ditinjau ({conflicts.length})
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Versi data lokal berbeda dengan master cloud Turso.
+                </p>
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => handleResolveConflictsLocal()}
+                  className="flex-1 rounded-xl bg-sky-400/20 border border-sky-400/30 py-2 px-2 text-[11px] font-bold text-sky-200 active:scale-95 transition"
+                >
+                  Pakai Semua Lokal
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleResolveConflicts()}
+                  className="flex-1 rounded-xl bg-amber-400/20 border border-amber-400/30 py-2 px-2 text-[11px] font-bold text-amber-200 active:scale-95 transition"
+                >
+                  Ikuti Semua Cloud
+                </button>
+              </div>
+            </div>
+
+            <ul className="space-y-2 text-xs">
+              {conflicts.slice(0, 10).map((c) => (
+                <li
+                  key={c.eventId}
+                  className="rounded-2xl border border-amber-400/10 bg-slate-950/70 p-3 space-y-2"
+                >
+                  <div>
+                    <span className="font-bold text-white">
+                      {c.domain} · {c.entityKey}
+                    </span>
+                    <p className="text-amber-200/80 text-[11px] mt-0.5">
+                      {c.reason}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleResolveConflictsLocal(c.eventId)}
+                      className="flex-1 rounded-lg border border-sky-400/30 bg-sky-400/10 py-1.5 text-[11px] font-bold text-sky-200 active:scale-95 transition"
+                    >
+                      Gunakan Lokal
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleResolveConflicts(c.eventId)}
+                      className="flex-1 rounded-lg border border-white/10 bg-white/5 py-1.5 text-[11px] font-bold text-slate-300 active:scale-95 transition"
+                    >
+                      Ikuti Cloud
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {/* Failed Actions */}
         {(status?.failed ?? 0) > 0 && (

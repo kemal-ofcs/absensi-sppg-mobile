@@ -6,6 +6,10 @@ import { useEffect, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
 import { canAccessArea, hasPermission } from "@/lib/auth/access";
+import {
+  calculateDistanceMeters,
+  getCurrentCoordinates,
+} from "@/lib/client/geolocation";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
 import {
@@ -15,12 +19,19 @@ import {
 } from "@/lib/gateways/geofence";
 import {
   clearTursoConfig,
-  getTursoUrl,
+  getDatabaseConfig,
   saveTursoConfig,
   type TursoConnectionStatus,
   testTursoConnection,
 } from "@/lib/gateways/turso-config";
 import { useOnlineStatus } from "@/lib/hooks/useOnlineStatus";
+import {
+  DATABASE_PROVIDER_OPTIONS,
+  type DatabaseProvider,
+  describeProvider,
+  reviewDatabaseEndpoint,
+} from "@/lib/validations/database-endpoint";
+import { validateGeofenceSettings } from "@/lib/validations/geofence";
 
 export default function SettingsPage() {
   const { user, isAuthenticated, isLoading: authLoading, logout } = useAuth();
@@ -28,6 +39,7 @@ export default function SettingsPage() {
   const isOnline = useOnlineStatus();
   const canOperational = canAccessArea(user, "operational");
   const canShift = canAccessArea(user, "shift");
+  const canPayroll = canAccessArea(user, "payroll");
   const canManageGeofence = Boolean(
     user?.isSuperadmin || hasPermission(user, "branding.manage"),
   );
@@ -42,6 +54,9 @@ export default function SettingsPage() {
   const [saveMessage, setSaveMessage] = useState("");
 
   const [tursoUrl, setTursoUrl] = useState("");
+  const [tursoProvider, setTursoProvider] = useState<DatabaseProvider>("turso");
+  const [tursoAllowInsecure, setTursoAllowInsecure] = useState(false);
+  const [tursoTokenSaved, setTursoTokenSaved] = useState(false);
   const [tursoToken, setTursoToken] = useState("");
   const [showTursoToken, setShowTursoToken] = useState(false);
   const [tursoBusy, setTursoBusy] = useState(false);
@@ -73,14 +88,30 @@ export default function SettingsPage() {
       setGeofenceLoading(false);
     }
     if (isAuthenticated && user?.isSuperadmin) {
-      getTursoUrl()
-        .then((url) => {
-          if (!cancelled && url) setTursoUrl(url);
+      // Provider ikut dimuat: tanpa itu perangkat yang terhubung ke server LAN
+      // selalu tampil dalam mode Turso dan penyimpanan berikutnya menolak
+      // alamat LAN-nya sendiri.
+      getDatabaseConfig()
+        .then((config) => {
+          if (cancelled || !config.configured) return;
+          setTursoUrl(config.databaseUrl);
+          setTursoProvider(config.provider);
+          setTursoAllowInsecure(config.allowInsecureTransport);
+          setTursoTokenSaved(config.authTokenSaved);
         })
         .catch(() => undefined);
     }
+
+    const onSyncCompleted = () => {
+      if (isAuthenticated && canManageGeofence) {
+        void loadGeofence();
+      }
+    };
+    window.addEventListener("sppg:sync-completed", onSyncCompleted);
+
     return () => {
       cancelled = true;
+      window.removeEventListener("sppg:sync-completed", onSyncCompleted);
     };
   }, [isAuthenticated, canManageGeofence, user?.isSuperadmin]);
 
@@ -89,6 +120,69 @@ export default function SettingsPage() {
     if (confirm("Apakah Anda yakin ingin keluar dari akun operator ini?")) {
       await logout();
       router.replace("/login");
+    }
+  };
+
+  const [currentDeviceCoords, setCurrentDeviceCoords] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
+  const [geofenceBusy, setGeofenceBusy] = useState(false);
+
+  const handleUseCurrentLocation = async () => {
+    setGeofenceBusy(true);
+    triggerHaptic("light");
+    const coordinates = await getCurrentCoordinates();
+    setGeofenceBusy(false);
+    if (!coordinates) {
+      triggerHaptic("error");
+      setSaveMessage(
+        "Lokasi GPS tidak dapat dideteksi. Pastikan GPS/Location HP aktif dan izin lokasi diizinkan.",
+      );
+      setTimeout(() => setSaveMessage(""), 4000);
+      return;
+    }
+    setCurrentDeviceCoords({
+      lat: coordinates.lat,
+      lng: coordinates.lng,
+    });
+    setGeofence((curr) => ({
+      ...curr,
+      latitude: Number(coordinates.lat.toFixed(7)),
+      longitude: Number(coordinates.lng.toFixed(7)),
+    }));
+    triggerHaptic("success");
+    setSaveMessage("Koordinat GPS HP berhasil dimasukkan ke form.");
+    setTimeout(() => setSaveMessage(""), 3000);
+  };
+
+  const handleSaveGeofence = async () => {
+    const errors = validateGeofenceSettings(geofence);
+    const firstError = Object.values(errors)[0];
+    if (firstError) {
+      triggerHaptic("error");
+      setSaveMessage(firstError);
+      setTimeout(() => setSaveMessage(""), 3000);
+      return;
+    }
+    setGeofenceBusy(true);
+    triggerHaptic("light");
+    try {
+      const saved = await saveGeofenceSettings(geofence);
+      setGeofence(saved);
+      triggerHaptic("success");
+      setSaveMessage(
+        "Pengaturan Geofencing berhasil disimpan dan disinkronkan.",
+      );
+      setTimeout(() => setSaveMessage(""), 3000);
+    } catch (error) {
+      triggerHaptic("error");
+      setSaveMessage(
+        error instanceof Error ? error.message : "Gagal menyimpan geofencing.",
+      );
+      setTimeout(() => setSaveMessage(""), 3000);
+    } finally {
+      setGeofenceBusy(false);
     }
   };
 
@@ -110,23 +204,49 @@ export default function SettingsPage() {
     }
   };
 
+  // Cermin sisi klien dari `normalize_database_url` di Rust. Backend tetap
+  // penjaga sebenarnya; ini hanya supaya formulir bisa menjelaskan lebih awal.
+  const tursoEndpoint = reviewDatabaseEndpoint(
+    tursoUrl,
+    tursoProvider,
+    tursoAllowInsecure,
+  );
+  const tursoProviderInfo = describeProvider(tursoProvider);
+
   const handleTursoSave = async () => {
-    if (!tursoUrl.trim()) {
-      setSaveMessage("URL database cloud Turso tidak boleh kosong.");
-      setTimeout(() => setSaveMessage(""), 3000);
+    // Tahan input yang jelas salah di sini supaya alasannya tampil di dekat
+    // field, bukan sebagai kegagalan IPC generik setelah penyimpanan.
+    if (!tursoEndpoint.valid) {
+      setSaveMessage(
+        tursoEndpoint.issue?.message ?? "URL database tidak dapat dipakai.",
+      );
+      setTimeout(() => setSaveMessage(""), 4000);
+      return;
+    }
+    if (tursoEndpoint.tokenRequired && !tursoToken.trim() && !tursoTokenSaved) {
+      setSaveMessage("Auth Token wajib diisi untuk alamat database ini.");
+      setTimeout(() => setSaveMessage(""), 4000);
       return;
     }
     setTursoBusy(true);
     triggerHaptic("light");
     try {
-      await saveTursoConfig(tursoUrl.trim(), tursoToken.trim());
+      await saveTursoConfig(tursoUrl.trim(), tursoToken.trim(), {
+        provider: tursoProvider,
+        allowInsecureTransport: tursoAllowInsecure,
+      });
+      if (tursoToken.trim().length > 0) setTursoTokenSaved(true);
       triggerHaptic("success");
       setSaveMessage(
-        "Konfigurasi database cloud Turso berhasil disimpan ke Vault!",
+        `Konfigurasi ${describeProvider(tursoProvider).label} berhasil disimpan ke Vault!`,
       );
       const status = await testTursoConnection(
         tursoUrl.trim(),
         tursoToken.trim(),
+        {
+          provider: tursoProvider,
+          allowInsecureTransport: tursoAllowInsecure,
+        },
       );
       setTursoTestStatus(status);
       setTimeout(() => setSaveMessage(""), 4000);
@@ -150,6 +270,10 @@ export default function SettingsPage() {
       const status = await testTursoConnection(
         tursoUrl.trim() || undefined,
         tursoToken.trim() || undefined,
+        {
+          provider: tursoProvider,
+          allowInsecureTransport: tursoAllowInsecure,
+        },
       );
       setTursoTestStatus(status);
       if (status.connected) {
@@ -185,6 +309,9 @@ export default function SettingsPage() {
       await clearTursoConfig();
       setTursoUrl("");
       setTursoToken("");
+      setTursoProvider("turso");
+      setTursoAllowInsecure(false);
+      setTursoTokenSaved(false);
       setTursoTestStatus(null);
       setSaveMessage("Konfigurasi database cloud Turso berhasil direset.");
       setTimeout(() => setSaveMessage(""), 3000);
@@ -300,6 +427,34 @@ export default function SettingsPage() {
           </div>
         ) : null}
 
+        {/* Slip & Estimasi Gaji Section (Hanya jika memiliki izin payroll) */}
+        {canPayroll ? (
+          <div className="rounded-3xl border border-emerald-500/20 bg-gradient-to-br from-emerald-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-xl bg-emerald-500/20 text-emerald-300">
+                  <Icon name="document" className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Slip &amp; Estimasi Gaji
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Kalkulasi upah harian &amp; arsip pembayaran digital
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/payroll"
+                onClick={() => triggerHaptic("light")}
+                className="rounded-xl bg-emerald-500 px-3.5 py-1.5 text-xs font-black text-slate-950 shadow-md hover:bg-emerald-400 active:scale-95 transition whitespace-nowrap"
+              >
+                Buka &rarr;
+              </Link>
+            </div>
+          </div>
+        ) : null}
+
         {/* Superadmin Turso Database Cloud Section */}
         {user?.isSuperadmin ? (
           <div className="rounded-3xl border border-cyan-400/20 bg-gradient-to-br from-cyan-950/20 via-slate-900/90 to-slate-900/95 p-4 backdrop-blur-md">
@@ -310,10 +465,10 @@ export default function SettingsPage() {
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-white">
-                    Database Cloud (Turso)
+                    Database (LibSQL)
                   </h3>
                   <p className="text-[11px] text-slate-400">
-                    Koneksi langsung LibSQL HTTP Pipeline
+                    Turso Cloud atau server database Anda sendiri
                   </p>
                 </div>
               </div>
@@ -323,29 +478,98 @@ export default function SettingsPage() {
             </div>
 
             <div className="space-y-3 pt-1">
+              <fieldset className="space-y-2">
+                <legend className="block text-[11px] font-bold text-slate-300">
+                  Jenis Database
+                </legend>
+                {DATABASE_PROVIDER_OPTIONS.map((option) => (
+                  <label
+                    key={option.value}
+                    className={`grid min-w-0 cursor-pointer gap-1 rounded-xl border p-2.5 text-[11px] leading-4 transition ${
+                      tursoProvider === option.value
+                        ? "border-cyan-400/60 bg-cyan-400/10 text-cyan-100"
+                        : "border-white/10 bg-slate-950/60 text-slate-400"
+                    }`}
+                  >
+                    <span className="flex items-center gap-2 font-black">
+                      <input
+                        type="radio"
+                        name="mobile-database-provider"
+                        value={option.value}
+                        checked={tursoProvider === option.value}
+                        onChange={() => {
+                          setTursoProvider(option.value);
+                          setTursoAllowInsecure(false);
+                          setTursoTestStatus(null);
+                        }}
+                        className="size-4 shrink-0 accent-cyan-400"
+                      />
+                      <span className="min-w-0 truncate">{option.label}</span>
+                    </span>
+                    <span className="font-normal opacity-80">
+                      {option.description}
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+
               <div>
                 <label
                   htmlFor="turso-url-input"
                   className="block text-[11px] font-bold text-slate-300 mb-1"
                 >
-                  URL Database Cloud
+                  {tursoProvider === "turso"
+                    ? "URL Database Cloud"
+                    : "Alamat Server Database"}
                 </label>
                 <input
                   id="turso-url-input"
                   type="text"
+                  inputMode="url"
                   value={tursoUrl}
-                  onChange={(e) => setTursoUrl(e.target.value)}
-                  placeholder="libsql://db-org.turso.io"
+                  onChange={(e) => {
+                    setTursoUrl(e.target.value);
+                    setTursoTestStatus(null);
+                  }}
+                  placeholder={tursoProviderInfo.urlPlaceholder}
                   className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-xs font-mono text-white outline-none focus:border-cyan-400"
                 />
+                {tursoUrl.trim().length > 0 && tursoEndpoint.issue ? (
+                  <p className="mt-1 text-[11px] leading-4 text-amber-300">
+                    {tursoEndpoint.issue.message}
+                  </p>
+                ) : null}
               </div>
+
+              {tursoProvider === "self_hosted" &&
+              (tursoEndpoint.issue?.code === "INSECURE_PUBLIC" ||
+                tursoAllowInsecure) ? (
+                <label className="flex items-start gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 p-2.5 text-[11px] font-bold leading-4 text-rose-200">
+                  <input
+                    type="checkbox"
+                    checked={tursoAllowInsecure}
+                    onChange={(e) => {
+                      setTursoAllowInsecure(e.target.checked);
+                      setTursoTestStatus(null);
+                    }}
+                    className="mt-0.5 size-4 shrink-0 accent-rose-400"
+                  />
+                  <span>
+                    Izinkan koneksi tanpa enkripsi ke alamat publik. Auth Token
+                    dan data absensi dikirim sebagai teks biasa. Pakai hanya
+                    pada jaringan yang benar-benar Anda percayai.
+                  </span>
+                </label>
+              ) : null}
 
               <div>
                 <label
                   htmlFor="turso-token-input"
                   className="block text-[11px] font-bold text-slate-300 mb-1"
                 >
-                  Auth Token Database
+                  {tursoEndpoint.tokenRequired
+                    ? "Auth Token Database"
+                    : "Auth Token Database (opsional)"}
                 </label>
                 <div className="relative">
                   <input
@@ -354,9 +578,9 @@ export default function SettingsPage() {
                     value={tursoToken}
                     onChange={(e) => setTursoToken(e.target.value)}
                     placeholder={
-                      tursoUrl
+                      tursoTokenSaved
                         ? "•••••••••••••••• (Tersimpan di vault)"
-                        : "eyJhbGciOiJFZERT..."
+                        : tursoProviderInfo.tokenPlaceholder
                     }
                     className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 pr-16 text-xs font-mono text-white outline-none focus:border-cyan-400"
                   />
@@ -379,7 +603,7 @@ export default function SettingsPage() {
                   }`}
                 >
                   {tursoTestStatus.connected
-                    ? `Terhubung ke Turso (Latensi: ${tursoTestStatus.latency_ms ?? 0} ms)`
+                    ? `Terhubung ke ${tursoProviderInfo.label} (Latensi: ${tursoTestStatus.latency_ms ?? 0} ms)`
                     : `Gagal terhubung: ${tursoTestStatus.error_message || "Periksa token/URL"}`}
                 </div>
               ) : null}
@@ -481,20 +705,171 @@ export default function SettingsPage() {
             </div>
           )}
 
-          <div className="rounded-2xl border border-white/5 bg-slate-950/60 p-3 text-xs text-slate-400 space-y-1">
-            <div className="flex justify-between">
-              <span>Radius Validasi:</span>
-              <span className="font-semibold text-white">
-                {geofence.radiusMeter} meter
-              </span>
+          {canManageGeofence ? (
+            <div className="space-y-3 pt-1">
+              <div className="grid grid-cols-2 gap-2">
+                <label className="space-y-1 text-xs text-slate-300">
+                  <span className="font-semibold">Latitude</span>
+                  <input
+                    type="number"
+                    step="any"
+                    min={-90}
+                    max={90}
+                    value={geofence.latitude}
+                    onChange={(e) =>
+                      setGeofence((c) => ({
+                        ...c,
+                        latitude: Number(e.target.value),
+                      }))
+                    }
+                    className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 font-mono text-xs text-white outline-none focus:border-sky-400"
+                  />
+                </label>
+                <label className="space-y-1 text-xs text-slate-300">
+                  <span className="font-semibold">Longitude</span>
+                  <input
+                    type="number"
+                    step="any"
+                    min={-180}
+                    max={180}
+                    value={geofence.longitude}
+                    onChange={(e) =>
+                      setGeofence((c) => ({
+                        ...c,
+                        longitude: Number(e.target.value),
+                      }))
+                    }
+                    className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 font-mono text-xs text-white outline-none focus:border-sky-400"
+                  />
+                </label>
+              </div>
+
+              <div className="space-y-1.5 text-xs text-slate-300">
+                <div className="flex justify-between items-center">
+                  <span className="font-semibold">Radius Kantor (meter)</span>
+                  <span className="font-mono font-bold text-sky-400">
+                    {geofence.radiusMeter}m
+                  </span>
+                </div>
+                <input
+                  type="number"
+                  min={10}
+                  max={10000}
+                  value={geofence.radiusMeter}
+                  onChange={(e) =>
+                    setGeofence((c) => ({
+                      ...c,
+                      radiusMeter: Number(e.target.value),
+                    }))
+                  }
+                  className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 font-mono text-xs text-white outline-none focus:border-sky-400"
+                />
+                <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                  {[25, 50, 100, 250, 500].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => {
+                        triggerHaptic("light");
+                        setGeofence((c) => ({ ...c, radiusMeter: preset }));
+                      }}
+                      className={`rounded-lg px-2.5 py-1 text-[11px] font-bold transition-all ${
+                        geofence.radiusMeter === preset
+                          ? "bg-sky-400 text-slate-950 shadow-sm"
+                          : "border border-white/10 bg-white/[0.04] text-slate-300 hover:bg-white/[0.08]"
+                      }`}
+                    >
+                      {preset}m
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {currentDeviceCoords ? (
+                <div className="rounded-2xl border border-white/10 bg-slate-950/80 p-3 text-xs space-y-1">
+                  <div className="flex justify-between text-slate-400">
+                    <span>GPS HP Anda:</span>
+                    <span className="font-mono text-sky-300">
+                      {currentDeviceCoords.lat.toFixed(5)},{" "}
+                      {currentDeviceCoords.lng.toFixed(5)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Jarak ke Titik Kantor:</span>
+                    <span className="font-mono font-bold text-white">
+                      {calculateDistanceMeters(
+                        currentDeviceCoords.lat,
+                        currentDeviceCoords.lng,
+                        geofence.latitude,
+                        geofence.longitude,
+                      )}{" "}
+                      meter
+                    </span>
+                  </div>
+                  <div className="pt-1 flex justify-end">
+                    <span
+                      className={`inline-block rounded-md px-2 py-0.5 text-[10px] font-bold ${
+                        calculateDistanceMeters(
+                          currentDeviceCoords.lat,
+                          currentDeviceCoords.lng,
+                          geofence.latitude,
+                          geofence.longitude,
+                        ) <= geofence.radiusMeter
+                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                          : "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                      }`}
+                    >
+                      {calculateDistanceMeters(
+                        currentDeviceCoords.lat,
+                        currentDeviceCoords.lng,
+                        geofence.latitude,
+                        geofence.longitude,
+                      ) <= geofence.radiusMeter
+                        ? "Di Dalam Radius Kantor"
+                        : "Di Luar Radius Kantor"}
+                    </span>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="flex flex-col gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={geofenceBusy}
+                  onClick={handleUseCurrentLocation}
+                  className="w-full rounded-xl border border-white/10 bg-white/[0.05] py-2.5 text-xs font-bold text-slate-200 hover:bg-white/10 active:scale-95 transition disabled:opacity-50"
+                >
+                  Ambil Lokasi GPS HP Ini
+                </button>
+                <button
+                  type="button"
+                  disabled={geofenceBusy}
+                  onClick={handleSaveGeofence}
+                  className="w-full rounded-xl bg-sky-400 py-2.5 text-xs font-black text-slate-950 shadow-md hover:bg-sky-300 active:scale-95 transition disabled:opacity-50"
+                >
+                  {geofenceBusy
+                    ? "Menyimpan..."
+                    : "Simpan Pengaturan Geofencing"}
+                </button>
+              </div>
             </div>
-            <div className="flex justify-between">
-              <span>Koordinat Kantor:</span>
-              <span className="font-mono text-slate-300">
-                {geofence.latitude.toFixed(5)}, {geofence.longitude.toFixed(5)}
-              </span>
+          ) : (
+            <div className="rounded-2xl border border-white/5 bg-slate-950/60 p-3 text-xs text-slate-400 space-y-1">
+              <div className="flex justify-between">
+                <span>Radius Validasi:</span>
+                <span className="font-semibold text-white">
+                  {geofence.radiusMeter} meter
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Koordinat Kantor:</span>
+                <span className="font-mono text-slate-300">
+                  {geofence.latitude.toFixed(5)},{" "}
+                  {geofence.longitude.toFixed(5)}
+                </span>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         {/* Hardware & App Information */}

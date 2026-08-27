@@ -22,6 +22,18 @@ describe("readOperationalSnapshot", () => {
           result(),
           result([{ id_libur: 1, nama_libur: "Libur Nasional" }]),
           result(),
+          result([{ id: "default_company", company_name: "SPPG" }]),
+          result([{ id: "default_template", name: "Default" }]),
+          result(),
+          result(),
+          result(),
+          result(),
+          result(),
+          result([
+            { id: "sc-1", id_karyawan: "employee-1", rate_per_hour: 25000 },
+          ]),
+          result(),
+          result(),
           result(),
           result(),
           result(),
@@ -35,13 +47,22 @@ describe("readOperationalSnapshot", () => {
     const snapshot = await readOperationalSnapshot(client);
 
     expect(receivedMode).toBe("read");
-    expect(receivedStatementCount).toBe(11);
+    expect(receivedStatementCount).toBe(21);
     expect(snapshot.revision).toBe(12);
     expect(snapshot.employees).toEqual([
       { id_unik: "employee-1", nama: "Operator Uji" },
     ]);
     expect(snapshot.holidays).toEqual([
       { id_libur: 1, nama_libur: "Libur Nasional" },
+    ]);
+    expect(snapshot.companyProfiles).toEqual([
+      { id: "default_company", company_name: "SPPG" },
+    ]);
+    expect(snapshot.idCardTemplates).toEqual([
+      { id: "default_template", name: "Default" },
+    ]);
+    expect(snapshot.salaryConfigs).toEqual([
+      { id: "sc-1", id_karyawan: "employee-1", rate_per_hour: 25000 },
     ]);
     expect(snapshot.scanLogs).toEqual([]);
   });

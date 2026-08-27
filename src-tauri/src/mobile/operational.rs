@@ -189,10 +189,11 @@ pub fn create_employee(state: &MobileState, draft: &Value) -> Result<Value, Comm
     transaction
         .execute(
             r#"
-      INSERT OR IGNORE INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate)
-      VALUES (?, ?, ?, 'Belum', ?);
+      INSERT INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate)
+      SELECT ?, ?, ?, 'Belum', ?
+      WHERE NOT EXISTS (SELECT 1 FROM id_card WHERE id_unik = ?);
       "#,
-            params![id, name, division, today],
+            params![id, name, division, today, id],
         )
         .map_err(|_| CommandError::internal())?;
     let now = storage::now_epoch_seconds();
@@ -340,8 +341,8 @@ pub fn import_employees(state: &MobileState, drafts: &[Value]) -> Result<Value, 
         }
 
         let _ = transaction.execute(
-            "INSERT OR IGNORE INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate) VALUES (?, ?, ?, 'Belum', ?);",
-            params![id, name, division, reg_date],
+            "INSERT INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate) SELECT ?, ?, ?, 'Belum', ? WHERE NOT EXISTS (SELECT 1 FROM id_card WHERE id_unik = ?);",
+            params![id, name, division, reg_date, id],
         );
 
         let _ = transaction.execute(
@@ -1007,6 +1008,18 @@ pub fn save_geofence_settings(state: &MobileState, settings: &Value) -> Result<(
                 params![key, value],
             )
             .map_err(|_| CommandError::internal())?;
+
+        // Bersihkan konflik & antrean outbox stale untuk key ini
+        let _ = transaction.execute(
+            "DELETE FROM desktop_sync_conflict WHERE domain = 'setting' AND entity_key = ?;",
+            params![key],
+        );
+        let _ = transaction.execute(
+            "DELETE FROM desktop_sync_outbox WHERE domain = 'setting' AND entity_key = ? AND status IN ('pending', 'failed', 'conflict');",
+            params![key],
+        );
+
+        // Enqueue secara otoritatif (base_revision: None) agar langsung disinkronkan ke cloud
         sync::enqueue(
             &transaction,
             &client_id,
@@ -1014,7 +1027,7 @@ pub fn save_geofence_settings(state: &MobileState, settings: &Value) -> Result<(
             "update",
             key,
             &json!({ "key": key, "value": value }),
-            base_revision(&transaction, "setting", key),
+            None,
         )?;
     }
     transaction.commit().map_err(|_| CommandError::internal())
@@ -1077,6 +1090,18 @@ pub fn save_scanner_settings(state: &MobileState, settings: &Value) -> Result<()
                 params![key, value],
             )
             .map_err(|_| CommandError::internal())?;
+
+        // Bersihkan konflik & antrean outbox stale untuk key ini
+        let _ = transaction.execute(
+            "DELETE FROM desktop_sync_conflict WHERE domain = 'setting' AND entity_key = ?;",
+            params![key],
+        );
+        let _ = transaction.execute(
+            "DELETE FROM desktop_sync_outbox WHERE domain = 'setting' AND entity_key = ? AND status IN ('pending', 'failed', 'conflict');",
+            params![key],
+        );
+
+        // Enqueue secara otoritatif (base_revision: None) agar langsung disinkronkan ke cloud
         sync::enqueue(
             &transaction,
             &client_id,
@@ -1084,7 +1109,7 @@ pub fn save_scanner_settings(state: &MobileState, settings: &Value) -> Result<()
             "update",
             key,
             &json!({ "key": key, "value": value }),
-            base_revision(&transaction, "setting", key),
+            None,
         )?;
     }
     transaction.commit().map_err(|_| CommandError::internal())
@@ -1114,7 +1139,7 @@ pub fn update_id_card(state: &MobileState, draft: &Value) -> Result<Value, Comma
     let today = &now[..10];
     transaction
         .execute(
-            "INSERT OR IGNORE INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate) SELECT id_unik, nama, divisi, 'Belum', ? FROM master_data WHERE id_unik = ?;",
+            "INSERT INTO id_card (id_unik, nama, divisi, idcard_status, tanggal_generate) SELECT id_unik, nama, divisi, 'Belum', ? FROM master_data WHERE id_unik = ? AND NOT EXISTS (SELECT 1 FROM id_card WHERE id_unik = master_data.id_unik);",
             params![today, id],
         )
         .map_err(|_| CommandError::internal())?;
@@ -1204,29 +1229,6 @@ pub fn save_desktop_file(filename: &str, base64_data: &str) -> Result<Value, Com
         "DESKTOP_SAVE_FAILED",
         &format!("Gagal menulis file ke media penyimpanan: {}", last_error),
     ))
-}
-
-pub fn share_desktop_file(filename: &str, base64_data: &str, title: Option<&str>) -> Result<Value, CommandError> {
-    let bytes = decode_base64(base64_data).ok_or_else(|| {
-        CommandError::new("SHARE_FAILED", "Format base64 file tidak valid.")
-    })?;
-
-    let sanitized_filename = filename.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-    let share_dir = std::env::temp_dir().join("sppg_share");
-    if !share_dir.exists() {
-        let _ = std::fs::create_dir_all(&share_dir);
-    }
-    let target_path = share_dir.join(&sanitized_filename);
-    std::fs::write(&target_path, &bytes).map_err(|e| {
-        CommandError::new("SHARE_FAILED", &format!("Gagal menyiapkan file untuk dibagikan: {}", e))
-    })?;
-
-    Ok(json!({
-        "sukses": true,
-        "path": target_path.to_string_lossy().to_string(),
-        "filename": sanitized_filename,
-        "title": title.unwrap_or("ID Card SPPG")
-    }))
 }
 
 pub fn list_holidays(state: &MobileState) -> Result<Value, CommandError> {
@@ -1468,19 +1470,28 @@ pub fn save_alfa_settings(state: &MobileState, enabled: bool) -> Result<Value, C
         )
         .map_err(|_| CommandError::internal())?;
 
+    // Bersihkan konflik & antrean outbox stale untuk auto_alfa_aktif
+    let _ = transaction.execute(
+        "DELETE FROM desktop_sync_conflict WHERE domain = 'setting' AND entity_key = 'auto_alfa_aktif';",
+        [],
+    );
+    let _ = transaction.execute(
+        "DELETE FROM desktop_sync_outbox WHERE domain = 'setting' AND entity_key = 'auto_alfa_aktif' AND status IN ('pending', 'failed', 'conflict');",
+        [],
+    );
+
     let sync_payload = json!({
         "key": "auto_alfa_aktif",
         "value": str_val,
     });
-    let revision = base_revision(&transaction, "setting", "auto_alfa_aktif");
     sync::enqueue(
         &transaction,
         &client_id,
         "setting",
-        "upsert",
+        "update",
         "auto_alfa_aktif",
         &sync_payload,
-        revision,
+        None,
     )?;
 
     transaction.commit().map_err(|_| CommandError::internal())?;
@@ -1816,7 +1827,6 @@ pub fn generate_alfa_harian(
     }))
 }
 
-#[allow(dead_code)]
 fn current_iso(connection: &rusqlite::Connection) -> String {
     connection
         .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now');", [], |row| {
@@ -2043,7 +2053,7 @@ pub fn update_company_profile(
     )?;
 
     transaction.commit().map_err(|_| CommandError::internal())?;
-    get_company_profile(state)
+    Ok(payload)
 }
 
 pub fn default_id_card_elements() -> Value {
@@ -2141,12 +2151,12 @@ pub fn default_id_card_elements() -> Value {
             "type": "text",
             "side": "front",
             "sourceKey": "employee.nik",
-            "label": "Kode / ID Karyawan",
+            "label": "NIK / Kode",
             "x": 6,
-            "y": 79,
-            "fontSize": 11,
-            "fontWeight": "bold",
-            "color": "#38bdf8",
+            "y": 78,
+            "fontSize": 10,
+            "fontWeight": "normal",
+            "color": "#94a3b8",
             "textAlign": "left",
             "visible": true
         },
@@ -2154,43 +2164,14 @@ pub fn default_id_card_elements() -> Value {
             "id": "el-emp-qr",
             "type": "qr_code",
             "side": "front",
-            "sourceKey": "employee.qr",
-            "label": "QR Code Absensi",
+            "sourceKey": "employee.qr_token",
+            "label": "QR Code Token",
             "x": 68,
-            "y": 38,
+            "y": 30,
             "width": 26,
-            "height": 52,
-            "fontSize": 12,
+            "height": 48,
+            "fontSize": 10,
             "color": "#000000",
-            "visible": true
-        },
-        {
-            "id": "el-back-logo",
-            "type": "company_logo",
-            "side": "back",
-            "sourceKey": "company.logo",
-            "label": "Logo Belakang",
-            "x": 8,
-            "y": 66,
-            "width": 16,
-            "height": 22,
-            "fontSize": 14,
-            "color": "#ffffff",
-            "visible": true
-        },
-        {
-            "id": "el-back-company",
-            "type": "text",
-            "side": "back",
-            "sourceKey": "company.name",
-            "label": "Nama Instansi Belakang",
-            "x": 28,
-            "y": 72,
-            "fontSize": 14,
-            "fontWeight": "bold",
-            "color": "#ffffff",
-            "textAlign": "left",
-            "isUppercase": true,
             "visible": true
         },
         {
@@ -2257,7 +2238,6 @@ pub fn default_id_card_elements() -> Value {
     ])
 }
 
-#[allow(dead_code)]
 pub fn get_id_card_template(state: &MobileState, id: &str) -> Result<Value, CommandError> {
     let connection = storage::database(&state.data_dir)?;
     let target_id = if id.is_empty() {
@@ -2335,8 +2315,10 @@ pub fn get_id_card_template(state: &MobileState, id: &str) -> Result<Value, Comm
     }
 }
 
-#[allow(dead_code)]
-pub fn save_id_card_template(state: &MobileState, template: &Value) -> Result<Value, CommandError> {
+pub fn save_id_card_template(
+    state: &MobileState,
+    template: &Value,
+) -> Result<Value, CommandError> {
     let client_id = sync::ensure_client_id(state)?;
     let mut connection = storage::database(&state.data_dir)?;
     let transaction = connection
@@ -2482,7 +2464,9 @@ pub fn save_id_card_template(state: &MobileState, template: &Value) -> Result<Va
     get_id_card_template(state, id)
 }
 
-#[allow(dead_code)]
+/// Mendaftarkan ulang seluruh data master lokal (Shift, Template ID Card,
+/// Profil Instansi, Hari Libur, dan Pengaturan Sistem) ke antrean outbox.
+/// Memastikan seluruh konfigurasi lokal langsung terkirim ke Turso Cloud saat sinkronisasi.
 pub fn force_enqueue_settings(state: &MobileState) -> Result<Value, CommandError> {
     let client_id = sync::ensure_client_id(state)?;
     let mut connection = storage::database(&state.data_dir)?;
@@ -2687,7 +2671,11 @@ pub fn force_enqueue_settings(state: &MobileState) -> Result<Value, CommandError
 
     for setting in settings {
         let key = setting.get("key").and_then(Value::as_str).unwrap_or("");
-        if !key.is_empty() {
+        // Kunci koneksi hanya berlaku di perangkat ini. Dulu tombol "Kirim ulang
+        // pengaturan lokal" ikut mendorong `turso_database_url` dan
+        // `server_api_base_url` ke cloud, lalu perangkat lain menariknya dan bisa
+        // diarahkan ke database yang salah saat startup.
+        if !key.is_empty() && !sync::is_device_local_setting(key) {
             let _ = sync::enqueue(
                 &transaction,
                 &client_id,
