@@ -380,40 +380,93 @@ export default function OperationalPage() {
   // Delete Action Handlers
   const handleDeleteKoreksi = async (idReferensi: string) => {
     if (!confirm("Batalkan dan hapus data koreksi admin ini?")) return;
+    setFeedback(null);
     try {
       const res = await hapusKoreksiAdmin(idReferensi);
       if (res.sukses) {
         triggerHaptic("light");
+        setFeedback({
+          type: "success",
+          message: res.pesan || "Koreksi admin berhasil dihapus.",
+        });
         void loadTabRecords(date, "koreksi");
+      } else {
+        triggerHaptic("error");
+        setFeedback({
+          type: "error",
+          message: res.pesan || "Koreksi admin gagal dihapus.",
+        });
       }
-    } catch {
-      // Ignored
+    } catch (err: unknown) {
+      triggerHaptic("error");
+      setFeedback({
+        type: "error",
+        message:
+          err instanceof Error ? err.message : "Koreksi admin gagal dihapus.",
+      });
     }
   };
 
   const handleCancelBackup = async (idBackup: string) => {
     if (!confirm("Batalkan penugasan backup ini?")) return;
+    setFeedback(null);
     try {
       const res = await batalkanPenugasanBackup(idBackup);
       if (res.sukses) {
         triggerHaptic("light");
+        setFeedback({
+          type: "success",
+          message: res.pesan || "Penugasan backup berhasil dibatalkan.",
+        });
         void loadTabRecords(date, "backup");
+      } else {
+        triggerHaptic("error");
+        setFeedback({
+          type: "error",
+          message: res.pesan || "Penugasan backup gagal dibatalkan.",
+        });
       }
-    } catch {
-      // Ignored
+    } catch (err: unknown) {
+      // Kegagalan yang ditelan diam-diam membuat tombolnya tampak mati tanpa
+      // alasan. Izin yang kurang (`backups.manage`) muncul di sini, bukan di
+      // layar mana pun.
+      triggerHaptic("error");
+      setFeedback({
+        type: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Penugasan backup gagal dibatalkan.",
+      });
     }
   };
 
   const handleDeleteImport = async (eventKey: string) => {
     if (!confirm("Hapus entri manual ini?")) return;
+    setFeedback(null);
     try {
       const res = await hapusImportOffline(eventKey);
       if (res.sukses) {
         triggerHaptic("light");
+        setFeedback({
+          type: "success",
+          message: res.pesan || "Entri manual berhasil dihapus.",
+        });
         void loadTabRecords(date, "manual");
+      } else {
+        triggerHaptic("error");
+        setFeedback({
+          type: "error",
+          message: res.pesan || "Entri manual gagal dihapus.",
+        });
       }
-    } catch {
-      // Ignored
+    } catch (err: unknown) {
+      triggerHaptic("error");
+      setFeedback({
+        type: "error",
+        message:
+          err instanceof Error ? err.message : "Entri manual gagal dihapus.",
+      });
     }
   };
 

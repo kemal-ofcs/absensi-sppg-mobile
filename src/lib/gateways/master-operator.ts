@@ -35,6 +35,8 @@ function normalizeOperator(value: JsonRecord): OperatorRecord {
     kodeOperator: String(value.kodeOperator ?? value.kode_operator ?? ""),
     name: String(value.name ?? value.nama_operator ?? ""),
     username: String(value.username ?? ""),
+    email: String(value.email ?? ""),
+    noHp: String(value.noHp ?? value.no_hp ?? ""),
     roleId: Number(value.roleId ?? value.role_id ?? 0),
     roleKey: String(value.roleKey ?? value.role_key ?? "operator"),
     roleName: String(
@@ -63,6 +65,8 @@ function normalizeRole(value: JsonRecord): RoleRecord {
       value.isSuperadmin ?? Number(value.is_superadmin ?? 0) === 1,
     ),
     status: value.status === "Nonaktif" ? "Nonaktif" : "Aktif",
+    requireTotp:
+      value.requireTotp === true || Number(value.require_totp ?? 0) === 1,
     operatorCount: Number(value.operatorCount ?? value.operator_count ?? 0),
     permissions,
   };
@@ -93,6 +97,8 @@ export async function createOperator(actorId: number, draft: OperatorDraft) {
           kode_operator: draft.kodeOperator,
           nama_operator: draft.name,
           username: draft.username,
+          email: draft.email,
+          no_hp: draft.noHp,
           password: draft.password,
           role_id: draft.roleId,
           status: draft.status,
@@ -120,6 +126,8 @@ export async function updateMasterOperator(
       operatorId,
       draft: {
         nama_operator: draft.name,
+        email: draft.email,
+        no_hp: draft.noHp,
         password: draft.password,
         role_id: draft.roleId,
         status: draft.status,
@@ -200,6 +208,7 @@ export async function updateRole(
         nama_role: draft.name,
         deskripsi: draft.description,
         status: draft.status,
+        require_totp: draft.requireTotp === true,
       },
     });
   }

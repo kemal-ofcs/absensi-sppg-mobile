@@ -32,9 +32,14 @@ const dirsToCopy = [
   "lib/contracts",
   "lib/gateways",
   "lib/hooks",
+  // Konfigurasi pengirim email sistem dan mesin liveness "Lupa Password":
+  // keduanya murni logika lintas platform dan WAJIB identik di kedua workspace
+  // karena Web menghitung ulang vonis liveness dengan modul yang sama.
+  "lib/mail",
   "lib/operators",
   "lib/rbac",
   "lib/runtime",
+  "lib/security",
   "lib/server",
   "lib/services",
   "lib/utils",

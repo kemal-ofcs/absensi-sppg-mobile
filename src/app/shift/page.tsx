@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
+import { isShiftFleksibel } from "@/lib/attendance/time-policy";
 import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
@@ -177,6 +178,64 @@ export default function MobileShiftPage() {
     }
   };
 
+  // Fleksibel BUKAN kolom tersendiri: shift 00:00-23:59 memang tidak punya jam
+  // masuk/pulang efektif, dan itulah yang dibaca `isShiftFleksibel` di seluruh
+  // aplikasi (scanner, Generate Alfa, Audit Kualitas Absensi). Toggle ini hanya
+  // menuliskan bentuk yang sudah dikenali itu, sehingga tidak ada skema baru
+  // yang harus disinkronkan ke empat lapisan.
+  const modeFleksibel = isShiftFleksibel(
+    formData.jam_masuk,
+    formData.jam_pulang,
+    formData.jam_kerja_normal_menit ?? 0,
+  );
+
+  const setModeFleksibel = (aktif: boolean) => {
+    setFormData((prev) => {
+      if (aktif) {
+        return {
+          ...prev,
+          jam_masuk: "00:00",
+          jam_pulang: "23:59",
+          awal_absen_menit: 0,
+          batas_masuk_menit: 0,
+          toleransi_masuk_menit: 0,
+          istirahat_menit: 0,
+          offset_istirahat_mulai: 0,
+          batas_pulang_menit: 0,
+          buffer_shift_malam_menit: 0,
+          jam_kerja_normal_menit: hitungJamKerjaNormalOtomatis(
+            "00:00",
+            "23:59",
+            0,
+            0,
+          ),
+        };
+      }
+      const masuk = "07:00";
+      const pulang = "15:00";
+      const istirahat = 60;
+      const batasMasuk = 60;
+      return {
+        ...prev,
+        jam_masuk: masuk,
+        jam_pulang: pulang,
+        awal_absen_menit: 120,
+        batas_masuk_menit: batasMasuk,
+        toleransi_masuk_menit: 0,
+        istirahat_menit: istirahat,
+        offset_istirahat_mulai: 240,
+        batas_pulang_menit: 240,
+        buffer_shift_malam_menit: 120,
+        jam_kerja_normal_menit: hitungJamKerjaNormalOtomatis(
+          masuk,
+          pulang,
+          istirahat,
+          batasMasuk,
+        ),
+      };
+    });
+  };
+
   const openAddModal = () => {
     if (!canManage) return;
     triggerHaptic("light");
@@ -215,6 +274,7 @@ export default function MobileShiftPage() {
       offset_generate_alfa: 180,
       buffer_shift_malam_menit: 120,
       izinkan_multi_sesi: 0,
+      shift_lanjutan_id: 0,
     });
     setFormErrors({});
     setErrorMsg(null);
@@ -258,6 +318,7 @@ export default function MobileShiftPage() {
         row.izinkan_multi_sesi === true
           ? 1
           : 0,
+      shift_lanjutan_id: Number(row.shift_lanjutan_id || 0),
     });
     setFormErrors({});
     setErrorMsg(null);
@@ -712,6 +773,49 @@ export default function MobileShiftPage() {
             </div>
 
             {/* Bagian 2: Jam Operasional & Istirahat */}
+            <div className="rounded-2xl border border-violet-500/25 bg-violet-500/5 p-3.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <span className="block text-[13px] font-bold text-violet-300">
+                    Shift Fleksibel
+                  </span>
+                  <span className="mt-1 block text-[10px] leading-4 text-slate-400">
+                    Bebas absen jam berapa saja sepanjang hari (00:00-23:59),
+                    tanpa keterlambatan dan tanpa batas jam pulang.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={modeFleksibel}
+                  aria-label="Jadikan shift ini fleksibel"
+                  onClick={() => {
+                    triggerHaptic("light");
+                    setModeFleksibel(!modeFleksibel);
+                  }}
+                  className={`relative h-6 w-11 shrink-0 rounded-full transition ${
+                    modeFleksibel ? "bg-violet-500" : "bg-slate-700"
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 size-5 rounded-full bg-white transition-all ${
+                      modeFleksibel ? "left-[22px]" : "left-0.5"
+                    }`}
+                  />
+                </button>
+              </div>
+              {modeFleksibel ? (
+                <p className="mt-2 rounded-xl bg-slate-950/60 p-2 text-[10px] leading-4 text-violet-200">
+                  Karyawan tetap wajib hadir. Kalau harinya bukan hari libur dan
+                  ia lupa scan masuk, lupa scan pulang, atau tidak absen sama
+                  sekali, keterangannya tetap muncul seperti shift biasa
+                  (&quot;Belum Scan Pulang&quot;, &quot;Alfa&quot;, dan
+                  seterusnya) &mdash; hanya saja baru dinilai setelah harinya
+                  habis, bukan di tengah hari.
+                </p>
+              ) : null}
+            </div>
+
             <div className="rounded-2xl border border-white/10 bg-slate-950/70 p-3.5 space-y-3">
               <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
                 2. Jam Operasional &amp; Kerja
@@ -727,12 +831,13 @@ export default function MobileShiftPage() {
                   </label>
                   <input
                     id="jam-masuk-input"
+                    disabled={modeFleksibel}
                     type="time"
                     value={formData.jam_masuk}
                     onChange={(e) =>
                       updateFormField("jam_masuk", e.target.value)
                     }
-                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white font-mono outline-none focus:border-emerald-500"
+                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white font-mono outline-none focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
                     required
                   />
                   {formErrors.jam_masuk && (
@@ -751,12 +856,13 @@ export default function MobileShiftPage() {
                   </label>
                   <input
                     id="jam-pulang-input"
+                    disabled={modeFleksibel}
                     type="time"
                     value={formData.jam_pulang}
                     onChange={(e) =>
                       updateFormField("jam_pulang", e.target.value)
                     }
-                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white font-mono outline-none focus:border-sky-500"
+                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white font-mono outline-none focus:border-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
                     required
                   />
                   {formErrors.jam_pulang && (
@@ -777,13 +883,14 @@ export default function MobileShiftPage() {
                   </label>
                   <input
                     id="istirahat-input"
+                    disabled={modeFleksibel}
                     type="number"
                     min="0"
                     value={formData.istirahat_menit ?? 60}
                     onChange={(e) =>
                       updateFormField("istirahat_menit", Number(e.target.value))
                     }
-                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white font-mono outline-none focus:border-sky-500"
+                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white font-mono outline-none focus:border-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
                   />
                 </div>
 
@@ -820,6 +927,7 @@ export default function MobileShiftPage() {
                   </label>
                   <input
                     id="awal-absen-input"
+                    disabled={modeFleksibel}
                     type="number"
                     min="0"
                     value={formData.awal_absen_menit ?? 120}
@@ -829,7 +937,7 @@ export default function MobileShiftPage() {
                         Number(e.target.value),
                       )
                     }
-                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-2 py-2 text-white font-mono text-xs outline-none focus:border-amber-500"
+                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-2 py-2 text-white font-mono text-xs outline-none focus:border-amber-500 disabled:cursor-not-allowed disabled:opacity-40"
                   />
                 </div>
 
@@ -842,6 +950,7 @@ export default function MobileShiftPage() {
                   </label>
                   <input
                     id="batas-masuk-input"
+                    disabled={modeFleksibel}
                     type="number"
                     min="0"
                     value={formData.batas_masuk_menit ?? 60}
@@ -851,7 +960,7 @@ export default function MobileShiftPage() {
                         Number(e.target.value),
                       )
                     }
-                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-2 py-2 text-white font-mono text-xs outline-none focus:border-amber-500"
+                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-2 py-2 text-white font-mono text-xs outline-none focus:border-amber-500 disabled:cursor-not-allowed disabled:opacity-40"
                   />
                 </div>
 
@@ -864,6 +973,7 @@ export default function MobileShiftPage() {
                   </label>
                   <input
                     id="toleransi-telat-input"
+                    disabled={modeFleksibel}
                     type="number"
                     min="0"
                     value={formData.toleransi_masuk_menit ?? 0}
@@ -873,7 +983,7 @@ export default function MobileShiftPage() {
                         Number(e.target.value),
                       )
                     }
-                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-2 py-2 text-white font-mono text-xs outline-none focus:border-amber-500"
+                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-2 py-2 text-white font-mono text-xs outline-none focus:border-amber-500 disabled:cursor-not-allowed disabled:opacity-40"
                   />
                 </div>
               </div>
@@ -888,6 +998,7 @@ export default function MobileShiftPage() {
                   </label>
                   <input
                     id="batas-pulang-input"
+                    disabled={modeFleksibel}
                     type="number"
                     min="0"
                     value={formData.batas_pulang_menit ?? 240}
@@ -897,7 +1008,7 @@ export default function MobileShiftPage() {
                         Number(e.target.value),
                       )
                     }
-                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white font-mono text-xs outline-none focus:border-amber-500"
+                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white font-mono text-xs outline-none focus:border-amber-500 disabled:cursor-not-allowed disabled:opacity-40"
                   />
                 </div>
 
@@ -930,11 +1041,11 @@ export default function MobileShiftPage() {
               <label className="flex items-center justify-between gap-3 cursor-pointer">
                 <div>
                   <span className="text-xs font-bold text-white block">
-                    Izinkan Multi-Sesi dalam 1 Hari
+                    Izinkan Auto Multi-Sesi (Turun Shift)
                   </span>
                   <p className="text-[10px] text-slate-400 mt-0.5">
-                    Memungkinkan scan masuk &amp; pulang berulang kali pada
-                    shift yang sama
+                    Karyawan yang selesai bekerja pada shift ini boleh langsung
+                    scan masuk ke shift lanjutan
                   </p>
                 </div>
                 <input
@@ -949,6 +1060,47 @@ export default function MobileShiftPage() {
                   className="size-5 rounded-lg border-white/20 bg-slate-900 text-sky-500 accent-sky-500"
                 />
               </label>
+
+              {Number(formData.izinkan_multi_sesi || 0) === 1 ? (
+                <div className="rounded-xl border border-sky-500/25 bg-sky-500/5 p-2.5">
+                  <label
+                    htmlFor="shift-lanjutan-input"
+                    className="block text-[11px] font-semibold text-slate-300 mb-1"
+                  >
+                    Lanjut ke Shift
+                  </label>
+                  <select
+                    id="shift-lanjutan-input"
+                    value={formData.shift_lanjutan_id ?? 0}
+                    onChange={(e) =>
+                      updateFormField(
+                        "shift_lanjutan_id",
+                        Number(e.target.value),
+                      )
+                    }
+                    className="w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white font-mono text-xs outline-none focus:border-sky-500"
+                  >
+                    <option value={0}>
+                      Cocokkan otomatis dengan jam shift
+                    </option>
+                    {shiftList
+                      .filter((row) => Number(row.id_shift) !== editId)
+                      .map((row) => (
+                        <option
+                          key={String(row.id_shift)}
+                          value={Number(row.id_shift)}
+                        >
+                          {String(row.nama_shift)} ({String(row.jam_masuk)} -{" "}
+                          {String(row.jam_pulang)})
+                        </option>
+                      ))}
+                  </select>
+                  <p className="mt-1 text-[10px] leading-4 text-slate-400">
+                    Kolom shift karyawan ikut dipindahkan ke shift tujuan saat
+                    sesi lanjutan dimulai.
+                  </p>
+                </div>
+              ) : null}
             </div>
 
             {/* Sticky Action Buttons */}

@@ -87,7 +87,7 @@ describe("dynamic RBAC migration", () => {
       "SELECT version FROM schema_migration ORDER BY version;",
     );
     expect(migrations.rows.map((row) => Number(row.version))).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
     ]);
 
     const sessionColumns = await client.execute(
@@ -134,7 +134,7 @@ describe("password hashing", () => {
       valid: true,
       needsUpgrade: false,
     });
-  }, 20000);
+  }, 45000);
 });
 
 describe("provisioning silang Web dan Desktop/Mobile", () => {

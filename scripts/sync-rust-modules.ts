@@ -21,6 +21,12 @@ const filesToSync = [
   // menanam shift default. Karena keduanya membangun database Turso yang sama,
   // berkas ini WAJIB identik.
   "turso.rs",
+  // Sumber kebenaran tunggal untuk timestamp absensi: penentuan tanggal kerja,
+  // jendela scan pulang, deteksi shift fleksibel, dan cutoff Generate Alfa.
+  // Berkas ini dulu dipelihara terpisah di kedua workspace tanpa alat apa pun
+  // yang menjaganya tetap sama — persis kelas drift yang membuat aturan shift
+  // berbeda antar platform.
+  "time_policy.rs",
 ];
 
 for (const file of filesToSync) {

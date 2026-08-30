@@ -66,6 +66,8 @@ export function BootstrapPanel({
   const [authToken, setAuthToken] = useState("");
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
+  const [noHp, setNoHp] = useState("");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [feedback, setFeedback] = useState("");
@@ -180,6 +182,8 @@ export function BootstrapPanel({
         kodeOperator: "SPD001",
         namaOperator: name,
         username,
+        email,
+        noHp,
         password,
         databaseUrl: needsCredentials ? databaseUrl : undefined,
         authToken: needsCredentials ? authToken : undefined,
@@ -438,6 +442,36 @@ export function BootstrapPanel({
                 value={username}
                 onChange={(event) => setUsername(event.target.value)}
                 autoComplete="username"
+                className={inputClass}
+              />
+            </label>
+            {/* Kontak Superadmin wajib: akun pertama aplikasi ini tidak punya
+                Admin lain yang bisa memulihkannya, hanya email pada alur Lupa
+                Password. */}
+            <label className="grid gap-1.5 text-xs font-bold text-slate-300">
+              Email
+              <input
+                required
+                type="email"
+                maxLength={120}
+                placeholder="superadmin@sppg.id"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                autoComplete="email"
+                className={inputClass}
+              />
+            </label>
+            <label className="grid gap-1.5 text-xs font-bold text-slate-300">
+              Nomor HP
+              <input
+                required
+                type="tel"
+                inputMode="tel"
+                maxLength={20}
+                placeholder="08xxxxxxxxxx"
+                value={noHp}
+                onChange={(event) => setNoHp(event.target.value)}
+                autoComplete="tel"
                 className={inputClass}
               />
             </label>

@@ -55,6 +55,20 @@ export const PERMISSION_CATALOG = [
     name: "Hapus Riwayat Absensi",
     group: "Riwayat",
   },
+  // MENGAJUKAN reset password tidak butuh izin apa pun — alur "Lupa Password"
+  // memang terbuka untuk semua akun tanpa sesi login. Dua izin di bawah hanya
+  // mengatur siapa yang boleh MELIHAT dan MENGHAPUS riwayat pengajuan itu,
+  // karena riwayatnya menyimpan foto wajah pemohon.
+  {
+    key: "password_reset.view",
+    name: "Lihat Riwayat Reset Password",
+    group: "Sistem",
+  },
+  {
+    key: "password_reset.delete",
+    name: "Hapus Riwayat Reset Password",
+    group: "Sistem",
+  },
   { key: "operators.view", name: "Lihat Master Operator", group: "Sistem" },
   { key: "operators.manage", name: "Kelola Master Operator", group: "Sistem" },
   { key: "roles.manage", name: "Kelola Role & Akses", group: "Sistem" },
@@ -122,6 +136,11 @@ export const SENSITIVE_MUTATION_PERMISSIONS = new Set<PermissionKey>([
   "history.delete",
   "operational.edit",
   "operational.delete",
+  // Menghapus riwayat reset menghilangkan satu-satunya jejak siapa yang pernah
+  // mengajukan pemulihan beserta foto wajahnya. Tidak ikut paket bawaan Admin —
+  // harus diberikan sadar lewat Role & Akses, sama seperti hak hapus data
+  // operasional.
+  "password_reset.delete",
 ]);
 
 export const SYSTEM_ROLE_KEYS = [

@@ -3,8 +3,10 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { MailSettingsCard } from "@/components/MailSettingsCard";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { ThemeSettingsCard } from "@/components/ThemeSettingsCard";
+import { TwoFactorCard } from "@/components/TwoFactorCard";
 import { Icon } from "@/components/ui/Icon";
 import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import {
@@ -13,6 +15,12 @@ import {
 } from "@/lib/client/geolocation";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
+import {
+  getAutoAlfaSetting,
+  type RingkasanAlfa,
+  saveAutoAlfaSetting,
+  triggerGenerateAlfa,
+} from "@/lib/gateways/alfa";
 import {
   type GeofenceSettings,
   getGeofenceSettings,
@@ -41,9 +49,19 @@ export default function SettingsPage() {
   const canOperational = canAccessArea(user, "operational");
   const canShift = canAccessArea(user, "shift");
   const canPayroll = canAccessArea(user, "payroll");
+  const canAudit = canAccessArea(user, "audit");
   const canManageGeofence = Boolean(
     user?.isSuperadmin || hasPermission(user, "branding.manage"),
   );
+  // RBAC Auto Generate Alfa: mengubah status butuh "settings.manage",
+  // menjalankan manual butuh "alfa.trigger". Rust menolak keduanya lewat
+  // require_permission, jadi ini hanya supaya UI tidak menipu operator.
+  const canManageAutoAlfa = hasPermission(user, "settings.manage");
+  // Mengajukan reset password tidak butuh izin apa pun; melihat riwayatnya
+  // butuh. Dua hal berbeda, jadi menu ini muncul terpisah dari Pengaturan.
+  const canViewResetHistory = canAccessArea(user, "password_reset");
+  const canTriggerAlfa = hasPermission(user, "alfa.trigger");
+  const canSeeAutoAlfa = canManageAutoAlfa || canTriggerAlfa;
 
   const [geofence, setGeofence] = useState<GeofenceSettings>({
     enabled: false,
@@ -53,6 +71,12 @@ export default function SettingsPage() {
   });
   const [geofenceLoading, setGeofenceLoading] = useState(true);
   const [saveMessage, setSaveMessage] = useState("");
+
+  const [autoAlfaEnabled, setAutoAlfaEnabled] = useState(true);
+  const [autoAlfaLoading, setAutoAlfaLoading] = useState(true);
+  const [autoAlfaBusy, setAutoAlfaBusy] = useState(false);
+  const [alfaTriggerBusy, setAlfaTriggerBusy] = useState(false);
+  const [alfaSummary, setAlfaSummary] = useState<RingkasanAlfa | null>(null);
 
   const [tursoUrl, setTursoUrl] = useState("");
   const [tursoProvider, setTursoProvider] = useState<DatabaseProvider>("turso");
@@ -83,10 +107,25 @@ export default function SettingsPage() {
         if (!cancelled) setGeofenceLoading(false);
       }
     }
+    async function loadAutoAlfa() {
+      try {
+        const enabled = await getAutoAlfaSetting();
+        if (!cancelled) setAutoAlfaEnabled(enabled);
+      } catch {
+        // Pertahankan nilai terakhir; status dimuat ulang saat sync selesai.
+      } finally {
+        if (!cancelled) setAutoAlfaLoading(false);
+      }
+    }
     if (isAuthenticated && canManageGeofence) {
       void loadGeofence();
     } else {
       setGeofenceLoading(false);
+    }
+    if (isAuthenticated && canSeeAutoAlfa) {
+      void loadAutoAlfa();
+    } else {
+      setAutoAlfaLoading(false);
     }
     if (isAuthenticated && user?.isSuperadmin) {
       // Provider ikut dimuat: tanpa itu perangkat yang terhubung ke server LAN
@@ -107,6 +146,9 @@ export default function SettingsPage() {
       if (isAuthenticated && canManageGeofence) {
         void loadGeofence();
       }
+      if (isAuthenticated && canSeeAutoAlfa) {
+        void loadAutoAlfa();
+      }
     };
     window.addEventListener("sppg:sync-completed", onSyncCompleted);
 
@@ -114,7 +156,7 @@ export default function SettingsPage() {
       cancelled = true;
       window.removeEventListener("sppg:sync-completed", onSyncCompleted);
     };
-  }, [isAuthenticated, canManageGeofence, user?.isSuperadmin]);
+  }, [isAuthenticated, canManageGeofence, canSeeAutoAlfa, user?.isSuperadmin]);
 
   const handleLogout = async () => {
     triggerHaptic("warning");
@@ -202,6 +244,53 @@ export default function SettingsPage() {
       setTimeout(() => setSaveMessage(""), 3000);
     } catch {
       triggerHaptic("error");
+    }
+  };
+
+  const handleAutoAlfaToggle = async (enabled: boolean) => {
+    setAutoAlfaBusy(true);
+    triggerHaptic("light");
+    try {
+      await saveAutoAlfaSetting(enabled);
+      setAutoAlfaEnabled(enabled);
+      triggerHaptic("success");
+      setSaveMessage(
+        `Auto Generate Alfa berhasil diubah menjadi ${enabled ? "Aktif" : "Nonaktif"}.`,
+      );
+      setTimeout(() => setSaveMessage(""), 3000);
+    } catch (error) {
+      triggerHaptic("error");
+      setSaveMessage(
+        error instanceof Error
+          ? error.message
+          : "Gagal menyimpan pengaturan Auto Generate Alfa.",
+      );
+      setTimeout(() => setSaveMessage(""), 4000);
+    } finally {
+      setAutoAlfaBusy(false);
+    }
+  };
+
+  const handleTriggerAlfaNow = async () => {
+    setAlfaTriggerBusy(true);
+    triggerHaptic("light");
+    try {
+      const ringkasan = await triggerGenerateAlfa();
+      setAlfaSummary(ringkasan);
+      triggerHaptic("success");
+      setSaveMessage(ringkasan.pesan);
+      setTimeout(() => setSaveMessage(""), 4000);
+    } catch (error) {
+      triggerHaptic("error");
+      setAlfaSummary(null);
+      setSaveMessage(
+        error instanceof Error
+          ? error.message
+          : "Gagal menjalankan Generate Alfa manual.",
+      );
+      setTimeout(() => setSaveMessage(""), 4000);
+    } finally {
+      setAlfaTriggerBusy(false);
     }
   };
 
@@ -456,6 +545,203 @@ export default function SettingsPage() {
                 Buka &rarr;
               </Link>
             </div>
+          </div>
+        ) : null}
+
+        {/* Audit Kualitas Absensi (butuh izin attendance_audit.view) */}
+        {canAudit ? (
+          <div className="rounded-3xl border border-rose-500/20 bg-gradient-to-br from-rose-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-xl bg-rose-500/20 text-rose-300">
+                  <Icon name="alert" className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Audit Kualitas Absensi
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Belum absen, sesi menggantung &amp; scan perlu verifikasi
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/audit-absensi"
+                onClick={() => triggerHaptic("light")}
+                className="rounded-xl bg-rose-500 px-3.5 py-1.5 text-xs font-black text-white shadow-md transition hover:bg-rose-400 active:scale-95"
+              >
+                Lihat &rarr;
+              </Link>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Keamanan akun sendiri: tidak dijaga izin apa pun, karena setiap
+            operator berhak mengamankan akunnya. */}
+        <TwoFactorCard />
+
+        {/* Riwayat Reset Password (butuh izin password_reset.view) */}
+        {canViewResetHistory ? (
+          <div className="rounded-3xl border border-violet-500/20 bg-gradient-to-br from-violet-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-xl bg-violet-500/20 text-violet-300">
+                  <Icon name="lock" className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Riwayat Reset Password
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Siapa yang mengajukan, foto wajah &amp; hasil verifikasi
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/riwayat-reset-password"
+                onClick={() => triggerHaptic("light")}
+                className="rounded-xl bg-violet-500 px-3.5 py-1.5 text-xs font-black text-white shadow-md transition hover:bg-violet-400 active:scale-95 whitespace-nowrap"
+              >
+                Lihat &rarr;
+              </Link>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Email Sistem: satu-satunya jalur pengiriman link Lupa Password. */}
+        {canManageAutoAlfa ? <MailSettingsCard /> : null}
+
+        {/* Auto Generate Alfa (butuh izin settings.manage / alfa.trigger) */}
+        {canSeeAutoAlfa ? (
+          <div className="rounded-3xl border border-amber-500/20 bg-gradient-to-br from-amber-950/25 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-2.5">
+                <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-amber-500/20 text-amber-300">
+                  <Icon name="clock" className="size-5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-bold text-white">
+                    Auto Generate Alfa
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Tandai Alfa otomatis setelah cutoff shift
+                  </p>
+                </div>
+              </div>
+              <span
+                className={`shrink-0 rounded-md border px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${
+                  autoAlfaEnabled
+                    ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-300"
+                    : "border-white/10 bg-slate-500/10 text-slate-400"
+                }`}
+              >
+                {autoAlfaLoading
+                  ? "Memuat"
+                  : autoAlfaEnabled
+                    ? "Aktif"
+                    : "Nonaktif"}
+              </span>
+            </div>
+
+            <p className="mt-3 rounded-2xl border border-white/10 bg-slate-950/60 p-3 text-[11px] leading-4 text-slate-400">
+              Karyawan aktif sesi NORMAL yang belum hadir dan tanpa koreksi
+              Sakit/Izin/Dispen ditandai Alfa setelah jam pulang dikurangi
+              offset shift. Pada tanggal hari libur aktif, proses ini otomatis
+              dilewati.
+            </p>
+
+            {canManageAutoAlfa ? (
+              <div className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+                <div className="min-w-0">
+                  <span className="text-xs font-bold text-white">
+                    Status Otomasi
+                  </span>
+                  <p className="text-[11px] text-slate-400">
+                    Matikan untuk menangguhkan penandaan Alfa di seluruh sistem.
+                  </p>
+                </div>
+                <label className="relative inline-flex shrink-0 cursor-pointer items-center">
+                  <input
+                    type="checkbox"
+                    checked={autoAlfaEnabled}
+                    disabled={autoAlfaBusy || autoAlfaLoading}
+                    onChange={(e) => {
+                      void handleAutoAlfaToggle(e.target.checked);
+                    }}
+                    className="peer sr-only"
+                  />
+                  <div className="peer h-6 w-11 rounded-full bg-slate-800 after:absolute after:top-0.5 after:left-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-slate-300 after:bg-white after:transition-all after:content-[''] peer-checked:bg-amber-400 peer-checked:after:translate-x-full peer-checked:after:border-white peer-focus:outline-none peer-disabled:opacity-50" />
+                </label>
+              </div>
+            ) : (
+              <p className="mt-3 rounded-2xl border border-white/10 bg-slate-950/40 p-3 text-[11px] font-semibold text-slate-500">
+                Role Anda hanya dapat menjalankan Generate Alfa manual. Mengubah
+                status otomasi membutuhkan izin Kelola Pengaturan Sistem.
+              </p>
+            )}
+
+            {canTriggerAlfa ? (
+              <button
+                type="button"
+                disabled={alfaTriggerBusy}
+                onClick={() => {
+                  void handleTriggerAlfaNow();
+                }}
+                className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 py-2.5 text-xs font-black text-slate-950 shadow-md transition hover:bg-amber-400 active:scale-95 disabled:opacity-50"
+              >
+                <Icon
+                  name={alfaTriggerBusy ? "clock" : "check"}
+                  className={`size-4 ${alfaTriggerBusy ? "animate-spin" : ""}`}
+                />
+                {alfaTriggerBusy
+                  ? "Memproses..."
+                  : "Jalankan Generate Alfa Sekarang"}
+              </button>
+            ) : null}
+
+            {alfaSummary ? (
+              <div className="mt-3 grid grid-cols-2 gap-2 rounded-2xl border border-white/10 bg-slate-950/60 p-3 text-[11px]">
+                <div className="flex justify-between gap-2">
+                  <span className="text-slate-500">Alfa dibuat:</span>
+                  <span className="font-black text-amber-300">
+                    {alfaSummary.jumlahAlfaDibuat}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-slate-500">Sudah ada:</span>
+                  <span className="font-bold text-slate-200">
+                    {alfaSummary.jumlahSudahAda}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-slate-500">Belum waktunya:</span>
+                  <span className="font-bold text-slate-200">
+                    {alfaSummary.jumlahBelumWaktunya}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-slate-500">Fleksibel (dinilai):</span>
+                  <span className="font-bold text-slate-200">
+                    {alfaSummary.jumlahFleksibel}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-slate-500">Hari libur:</span>
+                  <span className="font-bold text-slate-200">
+                    {alfaSummary.jumlahLibur}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-slate-500">Shift tidak valid:</span>
+                  <span className="font-bold text-rose-300">
+                    {alfaSummary.jumlahShiftTidakValid}
+                  </span>
+                </div>
+                <p className="col-span-2 pt-1 text-[11px] leading-4 text-slate-400">
+                  {alfaSummary.pesan}
+                </p>
+              </div>
+            ) : null}
           </div>
         ) : null}
 

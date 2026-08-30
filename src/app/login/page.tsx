@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   type FormEvent,
@@ -43,6 +44,9 @@ export default function LoginPage() {
   const isOnline = useOnlineStatus();
 
   const [username, setUsername] = useState("");
+  // Kolom kode baru muncul setelah server menyatakan password sudah benar.
+  const [totpCode, setTotpCode] = useState<string>("");
+  const [needsTotp, setNeedsTotp] = useState<boolean>(false);
   const [password, setPassword] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [cooldownSeconds, setCooldownSeconds] = useState(0);
@@ -130,12 +134,17 @@ export default function LoginPage() {
     triggerHaptic("light");
 
     try {
-      const result = await login(username.trim(), password);
+      const result = await login(
+        username.trim(),
+        password,
+        needsTotp ? totpCode : undefined,
+      );
       if (result.sukses) {
         triggerHaptic("success");
         router.replace("/dashboard");
       } else {
         triggerHaptic("error");
+        if (result.requiresTotp) setNeedsTotp(true);
         const msg = result.pesan || "Login gagal.";
         setErrorMessage(msg);
         const cooldown = parseCooldownSeconds(msg);
@@ -371,6 +380,39 @@ export default function LoginPage() {
                 <span>Masuk Aplikasi</span>
               )}
             </button>
+
+            {needsTotp ? (
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="totp-input"
+                  className="text-[11px] font-bold text-slate-300"
+                >
+                  Kode Verifikasi 2FA
+                </label>
+                <input
+                  id="totp-input"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={16}
+                  value={totpCode}
+                  onChange={(event) => setTotpCode(event.target.value)}
+                  placeholder="123456 atau kode cadangan"
+                  className="w-full min-h-12 rounded-2xl border border-white/15 bg-slate-950 px-4 text-sm font-mono tracking-[0.25em] text-white placeholder-slate-600 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-400/20 transition"
+                />
+                <p className="text-[11px] text-slate-500">
+                  Buka aplikasi autentikator Anda, atau masukkan kode cadangan.
+                </p>
+              </div>
+            ) : null}
+
+            <div className="text-center">
+              <Link
+                href="/lupa-password"
+                className="text-xs font-semibold text-slate-400 transition hover:text-sky-300"
+              >
+                Lupa Password?
+              </Link>
+            </div>
           </form>
         </div>
 
