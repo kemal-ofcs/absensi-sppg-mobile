@@ -1,12 +1,13 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import { ThemeProvider } from "@/components/ThemeProvider";
+import { BRANDING } from "@/lib/constants/branding";
 import { AuthProvider } from "@/lib/context/AuthContext";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "SPPG Absensi Mobile",
-  description: "Aplikasi Mobile Absensi & Operasional SPPG (Android & iOS)",
+  title: `${BRANDING.appDisplayName} Mobile`,
+  description: `${BRANDING.appDisplayName} Mobile Application (Android & iOS)`,
 };
 
 export const viewport: Viewport = {

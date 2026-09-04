@@ -27,6 +27,10 @@ import {
   saveGeofenceSettings,
 } from "@/lib/gateways/geofence";
 import {
+  getScanSecurity,
+  saveScanSecurity,
+} from "@/lib/gateways/scan-security";
+import {
   clearTursoConfig,
   getDatabaseConfig,
   saveTursoConfig,
@@ -41,6 +45,7 @@ import {
   reviewDatabaseEndpoint,
 } from "@/lib/validations/database-endpoint";
 import { validateGeofenceSettings } from "@/lib/validations/geofence";
+import { validateIpAllowlistEntries } from "@/lib/validations/ip-allowlist";
 
 export default function SettingsPage() {
   const { user, isAuthenticated, isLoading: authLoading, logout } = useAuth();
@@ -60,6 +65,9 @@ export default function SettingsPage() {
   // Mengajukan reset password tidak butuh izin apa pun; melihat riwayatnya
   // butuh. Dua hal berbeda, jadi menu ini muncul terpisah dari Pengaturan.
   const canViewResetHistory = canAccessArea(user, "password_reset");
+  // Mengambil foto bukti tidak butuh izin — kewajibannya ditentukan sakelar
+  // role. Yang di-RBAC adalah MELIHAT dan MENGHAPUS fotonya.
+  const canViewAttendancePhoto = canAccessArea(user, "attendance_photo");
   const canTriggerAlfa = hasPermission(user, "alfa.trigger");
   const canSeeAutoAlfa = canManageAutoAlfa || canTriggerAlfa;
 
@@ -70,6 +78,17 @@ export default function SettingsPage() {
     radiusMeter: 100,
   });
   const [geofenceLoading, setGeofenceLoading] = useState(true);
+  // Daftar IP absensi. Kebijakan kantor yang ikut sinkronisasi, jadi perubahan
+  // di sini langsung berlaku juga pada terminal Desktop.
+  const [ipAllowlist, setIpAllowlist] = useState<string[]>([]);
+  const [ipAllowlistDraft, setIpAllowlistDraft] = useState("");
+  const [ipDeviceAddresses, setIpDeviceAddresses] = useState<string[]>([]);
+  const [ipAllowlistBusy, setIpAllowlistBusy] = useState(false);
+  const [ipAllowlistMessage, setIpAllowlistMessage] = useState("");
+  // Sakelar induk tingkat perusahaan; sakelar per role hanya berlaku bila ini
+  // hidup.
+  const [scanPhotoEnabled, setScanPhotoEnabled] = useState(false);
+  const [scanIpEnabled, setScanIpEnabled] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
 
   const [autoAlfaEnabled, setAutoAlfaEnabled] = useState(true);
@@ -97,6 +116,22 @@ export default function SettingsPage() {
 
   useEffect(() => {
     let cancelled = false;
+    async function loadScanSecurity() {
+      if (!canManageGeofence) return;
+      try {
+        const settings = await getScanSecurity();
+        if (cancelled) return;
+        setScanPhotoEnabled(settings.photoEnabled);
+        setScanIpEnabled(settings.ipRestrictionEnabled);
+        setIpAllowlist(settings.entries);
+        setIpAllowlistDraft(settings.entries.join("\n"));
+        setIpDeviceAddresses(settings.deviceAddresses);
+      } catch {
+        // Ditangani lewat pesan pada saat menyimpan.
+      }
+    }
+    void loadScanSecurity();
+
     async function loadGeofence() {
       try {
         const settings = await getGeofenceSettings();
@@ -226,6 +261,50 @@ export default function SettingsPage() {
       setTimeout(() => setSaveMessage(""), 3000);
     } finally {
       setGeofenceBusy(false);
+    }
+  };
+
+  const handleSaveScanSecurity = async () => {
+    const entries = ipAllowlistDraft
+      .split(/[\n,;]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const validationMessage = Object.values(
+      validateIpAllowlistEntries(entries),
+    )[0];
+    if (validationMessage) {
+      setIpAllowlistMessage(validationMessage);
+      return;
+    }
+    setIpAllowlistBusy(true);
+    try {
+      const saved = await saveScanSecurity({
+        photoEnabled: scanPhotoEnabled,
+        ipRestrictionEnabled: scanIpEnabled,
+        entries,
+      });
+      setScanPhotoEnabled(saved.photoEnabled);
+      setScanIpEnabled(saved.ipRestrictionEnabled);
+      setIpAllowlist(saved.entries);
+      setIpAllowlistDraft(saved.entries.join("\n"));
+      setIpDeviceAddresses(saved.deviceAddresses);
+      setIpAllowlistMessage(
+        !saved.photoEnabled && !saved.ipRestrictionEnabled
+          ? "Kedua fitur dimatikan. Absensi berjalan seperti biasa."
+          : saved.ipRestrictionEnabled && saved.entries.length === 0
+            ? "Tersimpan. Pembatasan IP aktif tetapi daftarnya masih kosong, jadi belum ada yang dibatasi."
+            : "Pengaturan keamanan absensi tersimpan.",
+      );
+      triggerHaptic("success");
+    } catch (error) {
+      setIpAllowlistMessage(
+        error instanceof Error
+          ? error.message
+          : "Pengaturan keamanan absensi gagal disimpan.",
+      );
+      triggerHaptic("error");
+    } finally {
+      setIpAllowlistBusy(false);
     }
   };
 
@@ -464,7 +543,7 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* Pusat Operasional SPPG Section (Hanya jika memiliki izin operasional) */}
+        {/* Pusat Operasional Section (Hanya jika memiliki izin operasional) */}
         {canOperational ? (
           <div className="rounded-3xl border border-indigo-500/20 bg-gradient-to-br from-indigo-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
             <div className="flex items-center justify-between gap-3 mb-2">
@@ -474,7 +553,7 @@ export default function SettingsPage() {
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-white">
-                    Pusat Operasional SPPG
+                    Pusat Operasional
                   </h3>
                   <p className="text-[11px] text-slate-400">
                     Koreksi admin, penugasan backup &amp; entri manual
@@ -601,6 +680,34 @@ export default function SettingsPage() {
                 href="/riwayat-reset-password"
                 onClick={() => triggerHaptic("light")}
                 className="rounded-xl bg-violet-500 px-3.5 py-1.5 text-xs font-black text-white shadow-md transition hover:bg-violet-400 active:scale-95 whitespace-nowrap"
+              >
+                Lihat &rarr;
+              </Link>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Foto Bukti Absensi (butuh izin attendance_photo.view) */}
+        {canViewAttendancePhoto ? (
+          <div className="rounded-3xl border border-sky-500/20 bg-gradient-to-br from-sky-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-xl bg-sky-500/20 text-sky-300">
+                  <Icon name="scanner" className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Foto Bukti Absensi
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Foto saat scan, alamat IP perangkat &amp; operatornya
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/foto-absensi"
+                onClick={() => triggerHaptic("light")}
+                className="whitespace-nowrap rounded-xl bg-sky-500 px-3.5 py-1.5 text-xs font-black text-white shadow-md transition hover:bg-sky-400 active:scale-95"
               >
                 Lihat &rarr;
               </Link>
@@ -955,6 +1062,116 @@ export default function SettingsPage() {
             </Link>
           </div>
         </div>
+
+        {/* Keamanan absensi: sakelar induk fitur + daftar IP */}
+        {canManageGeofence ? (
+          <div className="rounded-3xl border border-white/10 bg-slate-900/80 p-4 backdrop-blur-md">
+            <div className="mb-3">
+              <h3 className="text-sm font-bold text-white">Keamanan Absensi</h3>
+              <p className="mt-0.5 text-xs text-slate-400">
+                Dua fitur opsional. Selama mati, sakelar per role di Master
+                Operator tidak berpengaruh apa pun.
+              </p>
+            </div>
+
+            <label className="flex items-start gap-3 rounded-2xl border border-white/10 bg-slate-950/50 p-3">
+              <input
+                type="checkbox"
+                checked={scanPhotoEnabled}
+                onChange={(event) => setScanPhotoEnabled(event.target.checked)}
+                className="mt-0.5 size-4 shrink-0"
+              />
+              <span className="text-[11px] leading-5 text-slate-300">
+                <strong className="text-white">Wajib foto bukti absensi</strong>
+                <br />
+                Setelah QR terbaca, terminal menahan sebentar dan memotret wajah
+                serta latar orang yang absen.
+              </span>
+            </label>
+
+            <label className="mt-2 flex items-start gap-3 rounded-2xl border border-white/10 bg-slate-950/50 p-3">
+              <input
+                type="checkbox"
+                checked={scanIpEnabled}
+                onChange={(event) => setScanIpEnabled(event.target.checked)}
+                className="mt-0.5 size-4 shrink-0"
+              />
+              <span className="text-[11px] leading-5 text-slate-300">
+                <strong className="text-white">Batasi alamat IP</strong>
+                <br />
+                Absensi hanya diterima dari alamat yang terdaftar di bawah.
+              </span>
+            </label>
+
+            {scanIpEnabled ? (
+              <div className="mt-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    Alamat IP yang diizinkan
+                  </p>
+                  <span
+                    className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${
+                      ipAllowlist.length > 0
+                        ? "border-sky-400/30 bg-sky-400/10 text-sky-200"
+                        : "border-amber-400/30 bg-amber-400/10 text-amber-200"
+                    }`}
+                  >
+                    {ipAllowlist.length > 0
+                      ? `${ipAllowlist.length} entri`
+                      : "Belum membatasi"}
+                  </span>
+                </div>
+                <textarea
+                  value={ipAllowlistDraft}
+                  onChange={(event) => setIpAllowlistDraft(event.target.value)}
+                  rows={4}
+                  spellCheck={false}
+                  placeholder={"192.168.1.0/24\n10.10.0.7"}
+                  className="w-full rounded-xl border border-white/10 bg-slate-950 p-3 font-mono text-xs text-white outline-none focus:border-sky-400"
+                />
+                {ipDeviceAddresses.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {ipDeviceAddresses.map((address) => (
+                      <button
+                        key={address}
+                        type="button"
+                        onClick={() =>
+                          setIpAllowlistDraft((current) =>
+                            current
+                              .split(/[\n,;]/)
+                              .map((item) => item.trim())
+                              .filter(Boolean)
+                              .includes(address)
+                              ? current
+                              : `${current.trim()}${current.trim() ? "\n" : ""}${address}`,
+                          )
+                        }
+                        className="rounded-xl border border-sky-400/30 bg-sky-400/10 px-3 py-1.5 font-mono text-[11px] font-bold text-sky-200"
+                      >
+                        + {address}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {ipAllowlistMessage ? (
+              <div className="mt-2 rounded-xl border border-sky-500/30 bg-sky-950/40 p-2.5 text-xs text-sky-200">
+                {ipAllowlistMessage}
+              </div>
+            ) : null}
+
+            <button
+              type="button"
+              onClick={() => void handleSaveScanSecurity()}
+              disabled={ipAllowlistBusy}
+              className="mt-3 w-full rounded-xl bg-sky-400 py-2.5 text-xs font-black text-slate-950 transition active:scale-95 disabled:opacity-60"
+            >
+              {ipAllowlistBusy ? "Menyimpan..." : "Simpan keamanan absensi"}
+            </button>
+          </div>
+        ) : null}
 
         {/* GPS Geofencing Preferences */}
         <div className="rounded-3xl border border-white/10 bg-slate-900/80 p-4 backdrop-blur-md">

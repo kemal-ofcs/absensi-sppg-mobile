@@ -11,6 +11,8 @@ export interface OperatorRecord {
    */
   email: string;
   noHp: string;
+  /** Verifikasi dua langkah aktif pada akun ini. */
+  totpEnabled: boolean;
   roleId: number;
   roleKey: string;
   roleName: string;

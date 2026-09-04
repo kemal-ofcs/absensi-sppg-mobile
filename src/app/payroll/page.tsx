@@ -17,6 +17,7 @@ import {
   type MobileSlipDetail,
   type MobileSlipSummary,
 } from "@/lib/gateways/payroll";
+import { useCompanyName } from "@/lib/hooks/useCompanyName";
 import { useHydrated } from "@/lib/hooks/useHydrated";
 
 interface ComponentItem {
@@ -88,6 +89,7 @@ export default function MobilePayrollPortalPage() {
   const isHydrated = useHydrated();
   const router = useRouter();
   const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const companyName = useCompanyName();
 
   const [activeTab, setActiveTab] = useState<"estimate" | "archive">(
     "estimate",
@@ -215,7 +217,7 @@ export default function MobilePayrollPortalPage() {
         (detail.bpjs_employee_total || 0) +
         (detail.pph21_amount || 0);
 
-      const textSummary = `*SLIP GAJI REAL-TIME (SPPG)*
+      const textSummary = `*SLIP GAJI REAL-TIME (${companyName.toUpperCase()})*
 Nama: ${detail.nama_karyawan} (${detail.id_karyawan})
 Divisi: ${detail.divisi}
 Periode: ${detail.period_start} s.d. ${detail.period_end}
@@ -228,7 +230,7 @@ Tunjangan: ${IDR.format(detail.total_allowances)}
 Total Potongan: -${IDR.format(totalPotongan)}
 ----------------------------------------
 *TAKE HOME PAY: ${IDR.format(detail.net_salary)}*
-Status: Estimasi Real-Time SPPG`;
+Status: Estimasi Real-Time ${companyName}`;
 
       await shareText(
         textSummary,

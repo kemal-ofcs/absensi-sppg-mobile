@@ -69,6 +69,28 @@ export const PERMISSION_CATALOG = [
     name: "Hapus Riwayat Reset Password",
     group: "Sistem",
   },
+  // MENGAKTIFKAN 2FA untuk akun sendiri tidak butuh izin apa pun — setiap
+  // operator berhak mengamankan akunnya, termasuk role paling terbatas.
+  // Yang di-RBAC adalah MEMATIKAN 2FA milik orang lain.
+  {
+    key: "two_factor.reset",
+    name: "Reset 2FA Operator Lain",
+    group: "Sistem",
+  },
+  // Foto bukti absensi memperlihatkan wajah dan lokasi orang saat scan, jadi
+  // membacanya adalah hak yang diberikan sadar — bukan bagian dari melihat
+  // rekap absensi biasa. MENGAMBIL fotonya tidak butuh izin: kewajibannya
+  // ditentukan sakelar role pada halaman Master Operator, bukan permission.
+  {
+    key: "attendance_photo.view",
+    name: "Lihat Foto Bukti Absensi",
+    group: "Sistem",
+  },
+  {
+    key: "attendance_photo.delete",
+    name: "Hapus Foto Bukti Absensi",
+    group: "Sistem",
+  },
   { key: "operators.view", name: "Lihat Master Operator", group: "Sistem" },
   { key: "operators.manage", name: "Kelola Master Operator", group: "Sistem" },
   { key: "roles.manage", name: "Kelola Role & Akses", group: "Sistem" },
@@ -141,6 +163,13 @@ export const SENSITIVE_MUTATION_PERMISSIONS = new Set<PermissionKey>([
   // harus diberikan sadar lewat Role & Akses, sama seperti hak hapus data
   // operasional.
   "password_reset.delete",
+  // Mematikan 2FA orang lain melucuti lapisan kedua akunnya. Berguna ketika
+  // ponsel hilang, tetapi juga jalan pintas bagi siapa pun yang ingin
+  // melemahkan akun sebelum menyerangnya — jadi harus diberikan sadar.
+  "two_factor.reset",
+  // Menghapus foto bukti absensi menghilangkan satu-satunya bukti visual bahwa
+  // sebuah scan benar dilakukan orang yang bersangkutan.
+  "attendance_photo.delete",
 ]);
 
 export const SYSTEM_ROLE_KEYS = [

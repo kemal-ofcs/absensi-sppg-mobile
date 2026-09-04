@@ -14,8 +14,16 @@ import {
   watchCoordinates,
 } from "@/lib/client/geolocation";
 import { triggerHaptic } from "@/lib/client/haptics";
+import {
+  captureScanPhoto,
+  isFaceVisible,
+  openFaceCamera,
+  type ScanPhotoCapture,
+  stopVideoStream,
+} from "@/lib/client/scan-photo";
 import { requestScreenWakeLock } from "@/lib/client/wakelock";
 import type { ScanResult, ScanTerminalInput } from "@/lib/contracts/scanner";
+import { getScanSecurity } from "@/lib/gateways/scan-security";
 import { submitTerminalScan } from "@/lib/gateways/scanner";
 
 type ScanLogItem = {
@@ -31,6 +39,32 @@ type ScanLogItem = {
 };
 
 export function ScannerView() {
+  // Jawabannya dihitung Rust (sakelar induk DAN sakelar role), lalu dibaca
+  // ulang setiap siklus sync. Menggabungkannya di sini dari objek sesi React
+  // akan memakai salinan yang dibekukan saat login — sakelar role yang baru
+  // diubah tidak akan pernah terlihat sampai aplikasi ditutup.
+  const [requiresScanPhoto, setRequiresScanPhoto] = useState(false);
+
+  // Sakelar induk hidup di setting yang ikut sinkronisasi, jadi ia dibaca ulang
+  // setiap siklus sync selesai — mematikannya dari Desktop langsung berlaku di
+  // ponsel ini tanpa perlu login ulang.
+  useEffect(() => {
+    let cancelled = false;
+    const muat = () => {
+      getScanSecurity()
+        .then((settings) => {
+          if (!cancelled) setRequiresScanPhoto(settings.photoRequiredForMe);
+        })
+        .catch(() => undefined);
+    };
+    muat();
+    window.addEventListener("sppg:sync-completed", muat);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("sppg:sync-completed", muat);
+    };
+  }, []);
+
   const [cameraActive, setCameraActive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [_lastResult, setLastResult] = useState<ScanResult | null>(null);
@@ -43,8 +77,25 @@ export function ScannerView() {
   const [torchOn, setTorchOn] = useState<boolean>(false);
   const [torchSupported, setTorchSupported] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  // Penahanan scan untuk foto wajah. Begitu QR terbaca dan role mewajibkan
+  // foto, absensi DITAHAN: kamera hadap-depan dibuka, orangnya difoto beserta
+  // latarnya, baru datanya dikirim. Memotret pada detik QR terbaca hanya
+  // menghasilkan foto kartu yang sedang ditempelkan ke lensa.
+  const [pendingScan, setPendingScan] = useState<string | null>(null);
+  const [faceCameraReady, setFaceCameraReady] = useState(false);
+  const [faceVisible, setFaceVisible] = useState(false);
+  /** Wajah terdeteksi stabil dan sedang dihitung mundur untuk jepretan. */
+  const [faceHolding, setFaceHolding] = useState(false);
+  const [faceCountdown, setFaceCountdown] = useState(0);
+  const [faceMessage, setFaceMessage] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const faceVideoRef = useRef<HTMLVideoElement>(null);
+  const faceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Kamera QR sedang hidup sebelum penahanan, jadi wajib dinyalakan lagi. */
+  const resumeCameraRef = useRef(false);
+  /** `startCamera` didefinisikan setelah blok ini; ref menjembataninya. */
+  const startCameraRef = useRef<(() => Promise<void>) | null>(null);
   const scannerControlsRef = useRef<IScannerControls | null>(null);
   const isSubmittingRef = useRef(false);
   const lastScannedQrRef = useRef<string>("");
@@ -146,22 +197,8 @@ export function ScannerView() {
   }, [loadCameraDevices]);
 
   // Handle Scan Submission with Audio, Haptics, and GPS
-  const handleProcessQr = useCallback(
-    async (qrRaw: string) => {
-      const trimmed = qrRaw.trim();
-      if (!trimmed || isSubmittingRef.current) return;
-
-      // Debounce identical scans within 3 seconds
-      const now = Date.now();
-      if (
-        lastScannedQrRef.current === trimmed &&
-        now - lastScannedTimeRef.current < 3000
-      ) {
-        return;
-      }
-      lastScannedQrRef.current = trimmed;
-      lastScannedTimeRef.current = now;
-
+  const submitScan = useCallback(
+    async (trimmed: string, photo: ScanPhotoCapture | null) => {
       isSubmittingRef.current = true;
       setIsProcessing(true);
 
@@ -171,6 +208,8 @@ export function ScannerView() {
           qrContent: trimmed,
           lat: gps?.lat,
           lng: gps?.lng,
+          fotoBase64: photo?.base64,
+          fotoMime: photo?.mime,
         };
 
         const result = await submitTerminalScan(payload);
@@ -246,6 +285,184 @@ export function ScannerView() {
     },
     [audioFeedback, hapticFeedback],
   );
+
+  const stopFaceCamera = useCallback(() => {
+    if (faceTimerRef.current) {
+      clearTimeout(faceTimerRef.current);
+      faceTimerRef.current = null;
+    }
+    stopVideoStream(faceVideoRef.current);
+    setFaceCameraReady(false);
+    setFaceVisible(false);
+    setFaceHolding(false);
+    setFaceCountdown(0);
+  }, []);
+
+  // Pembersihan saat unmount SAJA — dependency kosong. Menautkannya ke effect
+  // yang bergantung pada state akan mematikan kamera WebView Android tepat
+  // setelah dibuka (aturan siklus kamera repo ini).
+  useEffect(() => () => stopFaceCamera(), [stopFaceCamera]);
+
+  /**
+   * Gerbang scan: tanpa kewajiban foto langsung dikirim, dengan kewajiban foto
+   * QR ditahan sampai wajah orangnya terpotret.
+   */
+  const handleProcessQr = useCallback(
+    async (qrRaw: string) => {
+      const trimmed = qrRaw.trim();
+      if (!trimmed || isSubmittingRef.current || pendingScan) return;
+
+      // Debounce identical scans within 3 seconds
+      const now = Date.now();
+      if (
+        lastScannedQrRef.current === trimmed &&
+        now - lastScannedTimeRef.current < 3000
+      ) {
+        return;
+      }
+      lastScannedQrRef.current = trimmed;
+      lastScannedTimeRef.current = now;
+
+      if (!requiresScanPhoto) {
+        await submitScan(trimmed, null);
+        return;
+      }
+
+      if (hapticFeedback) triggerHaptic("light");
+      setFaceMessage(null);
+      // Kamera QR dimatikan lebih dulu: membuka kamera kedua sementara stream
+      // pemindai masih hidup membuat keduanya saling mematikan di WebView.
+      // Status kamera dibaca dari REF, bukan dari state: callback pemindai
+      // dibuat sekali saat kamera dinyalakan dan membekukan nilai state saat
+      // itu (`cameraActive === false`, karena kameranya baru mau hidup). Dengan
+      // state, kamera pemindai tidak pernah menyala lagi setelah foto diambil.
+      const qrCameraLive = scannerControlsRef.current !== null;
+      resumeCameraRef.current = qrCameraLive;
+      if (qrCameraLive) stopCamera();
+      // Kameranya dibuka pada effect di bawah, bukan di sini: elemen <video>
+      // baru ada di DOM setelah React merender panel penahanan.
+      setPendingScan(trimmed);
+    },
+    [requiresScanPhoto, submitScan, pendingScan, stopCamera, hapticFeedback],
+  );
+
+  // Buka kamera begitu panel penahanan terpasang.
+  useEffect(() => {
+    if (!pendingScan) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        // Terminal Mobile dipasang dengan kamera BELAKANG menghadap keluar ke
+        // karyawan — persis kamera yang dipakai memindai QR. Memaksa kamera
+        // depan di sini akan memotret ke arah operator/tembok di belakang
+        // ponsel, bukan wajah karyawan yang absen.
+        const stream = await openFaceCamera("environment");
+        const video = faceVideoRef.current;
+        if (cancelled || !video) {
+          for (const track of stream.getTracks()) track.stop();
+          return;
+        }
+        video.srcObject = stream;
+        await video.play();
+        if (!cancelled) setFaceCameraReady(true);
+      } catch {
+        if (!cancelled) {
+          setFaceMessage(
+            "Kamera tidak dapat dibuka. Role Anda mewajibkan foto bukti, jadi absensi tidak bisa dikirim tanpa kamera.",
+          );
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingScan]);
+
+  /**
+   * Nyalakan kembali kamera pemindai setelah penahanan selesai.
+   *
+   * Debounce QR terakhir ikut disegarkan: kartu yang sama masih di depan lensa
+   * saat kamera hidup lagi, dan tanpa ini ia langsung terbaca ulang lalu
+   * ditolak backend sebagai scan ganda.
+   */
+  const resumeQrCamera = useCallback(() => {
+    if (!resumeCameraRef.current) return;
+    resumeCameraRef.current = false;
+    lastScannedTimeRef.current = Date.now();
+    void startCameraRef.current?.();
+  }, []);
+
+  const closePhotoHold = useCallback(() => {
+    stopFaceCamera();
+    setPendingScan(null);
+    resumeQrCamera();
+  }, [stopFaceCamera, resumeQrCamera]);
+
+  const capturePhotoAndSubmit = useCallback(async () => {
+    const qr = pendingScan;
+    if (!qr) return;
+    const photo = captureScanPhoto(faceVideoRef.current);
+    if (!photo) {
+      setFaceMessage("Foto belum terambil. Coba lagi.");
+      return;
+    }
+    stopFaceCamera();
+    setPendingScan(null);
+    await submitScan(qr, photo);
+    // Kamera pemindai baru dinyalakan SETELAH absensi terkirim, supaya kartu
+    // yang masih menempel di lensa tidak terbaca ulang selagi permintaan jalan.
+    resumeQrCamera();
+  }, [pendingScan, stopFaceCamera, resumeQrCamera, submitScan]);
+
+  // Fase membidik lalu menahan diam sejenak sebelum memotret sendiri.
+  //
+  // Deteksi wajah masuk bingkai saja mudah diakali: karyawan cukup melintas
+  // sekilas di depan kamera lalu menyingkir sebelum jepretan sungguhan.
+  // Begitu wajah terdeteksi, sistem WAJIB melihatnya tetap ada selama
+  // HOLD_STILL_MS berturut-turut — wajah yang hilang di tengah jalan
+  // membatalkan hitungan dan mengulang dari awal — baru jepretan diambil,
+  // dengan teks "Jangan bergerak" di layar.
+  //
+  // Deteksi wajahnya memakai ulang detektor piksel milik verifikasi "Lupa
+  // Password" dan hanya berperan sebagai pemandu — jepretan tetap berjalan
+  // otomatis setelah tenggat FORCE_AFTER_MS meski wajah tidak pernah terbaca
+  // sama sekali, supaya kamera murah atau ruangan gelap tidak pernah
+  // memblokir absensi seseorang.
+  useEffect(() => {
+    if (!pendingScan || !faceCameraReady) return;
+    const TICK_MS = 150;
+    const HOLD_STILL_MS = 1_400;
+    const FORCE_AFTER_MS = 20_000;
+    const startedAt = Date.now();
+    let holdStartedAt: number | null = null;
+
+    const tick = () => {
+      const visible = isFaceVisible(faceVideoRef.current);
+      const now = Date.now();
+      setFaceVisible(visible);
+      holdStartedAt = visible ? (holdStartedAt ?? now) : null;
+      const holding = holdStartedAt !== null;
+      setFaceHolding(holding);
+      const holdElapsed = holding ? now - (holdStartedAt as number) : 0;
+      setFaceCountdown(
+        Math.max(0, Math.ceil((HOLD_STILL_MS - holdElapsed) / 1000)),
+      );
+      const overallElapsed = now - startedAt;
+      if (
+        (holding && holdElapsed >= HOLD_STILL_MS) ||
+        overallElapsed >= FORCE_AFTER_MS
+      ) {
+        void capturePhotoAndSubmit();
+        return;
+      }
+      faceTimerRef.current = setTimeout(tick, TICK_MS);
+    };
+
+    faceTimerRef.current = setTimeout(tick, TICK_MS);
+    return () => {
+      if (faceTimerRef.current) clearTimeout(faceTimerRef.current);
+    };
+  }, [pendingScan, faceCameraReady, capturePhotoAndSubmit]);
 
   // Start Camera Stream
   const startCamera = useCallback(async () => {
@@ -342,8 +559,110 @@ export function ScannerView() {
     }
   };
 
+  // Jembatan untuk closePhotoHold: startCamera didefinisikan setelah gerbang
+  // scan, jadi refnya diperbarui setiap render.
+  startCameraRef.current = startCamera;
+
   return (
     <div className="flex flex-col gap-4">
+      {/* Penahanan scan untuk foto wajah + latar. Panel menutupi layar supaya
+          jelas bahwa absensi BELUM terkirim sampai fotonya diambil. */}
+      {pendingScan ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/95 p-4">
+          <div className="w-full max-w-sm space-y-3 rounded-3xl border border-white/10 bg-slate-900 p-4">
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-amber-300">
+                QR terbaca — absensi ditahan
+              </p>
+              <h2 className="mt-1 text-base font-black text-white">
+                Ambil foto wajah &amp; latar
+              </h2>
+              <p className="mt-1 text-[11px] leading-5 text-slate-400">
+                Hadapkan wajah ke kamera bersama latar tempat Anda berdiri. Foto
+                diambil otomatis setelah wajah terdeteksi dan Anda tahan diam
+                sejenak.
+              </p>
+            </div>
+
+            <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-slate-950">
+              <video
+                ref={faceVideoRef}
+                muted
+                playsInline
+                aria-label="Pratinjau kamera foto bukti absensi"
+                // TIDAK dicerminkan: ini kamera BELAKANG menghadap karyawan,
+                // bukan kamera selfie. Mencerminkan feed kamera belakang
+                // membuat orang di layar terbalik kiri-kanan.
+                className="aspect-[3/4] w-full object-cover"
+              >
+                <track kind="captions" />
+              </video>
+              {faceCameraReady ? (
+                <>
+                  {faceHolding ? (
+                    <div className="absolute inset-0 flex items-center justify-center bg-slate-950/30">
+                      <div className="rounded-2xl bg-slate-950/80 px-4 py-2.5 text-center">
+                        <p className="text-base font-black text-emerald-300">
+                          Jangan bergerak
+                        </p>
+                        <p className="mt-0.5 font-mono text-[11px] text-slate-300">
+                          Foto diambil dalam {faceCountdown}s
+                        </p>
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-2 bg-gradient-to-t from-slate-950 to-transparent p-3">
+                    <span
+                      className={`rounded-full px-2.5 py-1 text-[10px] font-black ${
+                        faceHolding
+                          ? "bg-emerald-400/20 text-emerald-200"
+                          : faceVisible
+                            ? "bg-sky-400/20 text-sky-200"
+                            : "bg-amber-400/20 text-amber-200"
+                      }`}
+                    >
+                      {faceHolding
+                        ? "Menahan diam..."
+                        : faceVisible
+                          ? "Wajah terdeteksi"
+                          : "Posisikan wajah"}
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <div className="absolute inset-0 grid place-items-center text-[11px] text-slate-400">
+                  Menyalakan kamera...
+                </div>
+              )}
+            </div>
+
+            {faceMessage ? (
+              <output className="block rounded-xl border border-rose-400/30 bg-rose-400/10 p-2.5 text-[11px] text-rose-100">
+                {faceMessage}
+              </output>
+            ) : null}
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => void capturePhotoAndSubmit()}
+                disabled={!faceCameraReady}
+                className="min-h-11 flex-1 rounded-xl bg-emerald-400 text-xs font-black text-slate-950 active:scale-95 disabled:opacity-50"
+              >
+                Ambil foto sekarang
+              </button>
+              <button
+                type="button"
+                onClick={closePhotoHold}
+                className="min-h-11 rounded-xl border border-white/15 px-4 text-xs font-bold text-slate-300 active:scale-95"
+              >
+                Batal
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {/* Top Camera Viewport Card */}
       <div className="relative overflow-hidden rounded-3xl border border-white/15 bg-slate-900 shadow-2xl">
         <div className="theme-invariant relative aspect-[4/3] w-full bg-black flex items-center justify-center overflow-hidden">

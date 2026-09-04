@@ -13,12 +13,15 @@ import { BootstrapPanel } from "@/components/BootstrapPanel";
 import { BrandLogo } from "@/components/ui/BrandLogo";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { triggerHaptic } from "@/lib/client/haptics";
+import { BRANDING } from "@/lib/constants/branding";
 import { useAuth } from "@/lib/context/AuthContext";
 import {
   type BootstrapStatus,
   getBootstrapStatus,
 } from "@/lib/gateways/bootstrap";
 import { getServerUrl, setServerUrl } from "@/lib/gateways/server-config";
+import { useAppName } from "@/lib/hooks/useAppName";
+import { useCompanyName } from "@/lib/hooks/useCompanyName";
 import { useOnlineStatus } from "@/lib/hooks/useOnlineStatus";
 
 function parseCooldownSeconds(msg: string): number {
@@ -42,6 +45,8 @@ export default function LoginPage() {
   const { login, isAuthenticated, isLoading: authLoading } = useAuth();
   const router = useRouter();
   const isOnline = useOnlineStatus();
+  const appName = useAppName();
+  const companyName = useCompanyName();
 
   const [username, setUsername] = useState("");
   // Kolom kode baru muncul setelah server menyatakan password sudah benar.
@@ -229,7 +234,9 @@ export default function LoginPage() {
         <div className="flex flex-col items-center text-center mb-6">
           <BrandLogo size={56} className="mb-4 shadow-sky-500/20" />
           <h1 className="text-2xl font-black tracking-tight text-white">
-            Absensi SPPG
+            {companyName && companyName !== BRANDING.defaultCompanyName
+              ? `${appName} — ${companyName}`
+              : appName}
           </h1>
           <p className="text-xs font-semibold text-slate-400 mt-1">
             Mobile Edition • Android & iOS
@@ -427,7 +434,7 @@ export default function LoginPage() {
 
       {/* Footer Info */}
       <footer className="text-center text-[11px] text-slate-500">
-        SPPG Absensi Native Mobile v0.1 • 100% Offline-First
+        {appName} Mobile v0.1 • 100% Offline-First
       </footer>
 
       {/* Server Config Modal */}
@@ -448,8 +455,8 @@ export default function LoginPage() {
             </div>
 
             <p className="text-xs text-slate-300 mb-4 leading-relaxed">
-              Tentukan alamat server backend SPPG yang dituju untuk autentikasi
-              dan sinkronisasi data.
+              Tentukan alamat server backend yang dituju untuk autentikasi dan
+              sinkronisasi data.
             </p>
 
             <div className="mb-4">

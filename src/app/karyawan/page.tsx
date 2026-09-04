@@ -184,7 +184,7 @@ export default function KaryawanPage() {
         id_unik: String(emp.id_unik ?? ""),
         kode_karyawan: String(emp.kode_karyawan ?? ""),
         nama: String(emp.nama ?? ""),
-        divisi: String(emp.divisi ?? "SPPG Operational"),
+        divisi: String(emp.divisi ?? "Operational"),
         jabatan_status: String(emp.jabatan_status ?? "Staff"),
         no_hp: String(emp.no_hp ?? ""),
         lp: (emp.lp as "L" | "P") ?? "L",

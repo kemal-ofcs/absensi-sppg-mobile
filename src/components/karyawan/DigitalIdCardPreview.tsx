@@ -12,6 +12,7 @@ import {
 } from "@/lib/client/id-card-renderer";
 import { createQrPng, employeeQrPayload } from "@/lib/client/qr-code";
 import { shareDataUrl } from "@/lib/client/share";
+import { BRANDING } from "@/lib/constants/branding";
 import {
   type CompanyProfile,
   getCompanyProfile,
@@ -503,7 +504,7 @@ export function DigitalIdCardPreview({ employee }: DigitalIdCardPreviewProps) {
             </div>
           )}
           <span className="mt-1 text-[10px] font-bold text-slate-800 uppercase tracking-wider">
-            QR Absensi SPPG
+            QR {BRANDING.appDisplayName}
           </span>
         </div>
       )}

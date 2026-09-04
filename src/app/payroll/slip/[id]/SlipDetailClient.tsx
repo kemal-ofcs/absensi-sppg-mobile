@@ -13,6 +13,7 @@ import {
   getPayrollSlipDetail,
   type MobileSlipDetail,
 } from "@/lib/gateways/payroll";
+import { useCompanyName } from "@/lib/hooks/useCompanyName";
 import { useHydrated } from "@/lib/hooks/useHydrated";
 
 interface ComponentItem {
@@ -63,6 +64,7 @@ export default function SlipDetailClient() {
   const params = useParams();
   const slipId = String(params?.id || "");
   const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const companyName = useCompanyName();
 
   const [slip, setSlip] = useState<MobileSlipDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -106,7 +108,7 @@ export default function SlipDetailClient() {
     triggerHaptic();
     setSharing(true);
     try {
-      const textSummary = `*SLIP GAJI SPPG*
+      const textSummary = `*SLIP GAJI ${companyName.toUpperCase()}*
 Nama: ${slip.nama_karyawan} (${slip.id_karyawan})
 Divisi: ${slip.divisi}
 Periode: ${slip.period_start} s.d. ${slip.period_end}
@@ -199,7 +201,7 @@ Status: LUNAS / DIBAYAR`;
               <div className="flex justify-between items-start">
                 <div>
                   <span className="text-[10px] text-sky-400 font-bold uppercase tracking-wider">
-                    SPPG BUKTI GAJI RESMI
+                    {companyName} BUKTI GAJI RESMI
                   </span>
                   <h2 className="text-lg font-bold text-slate-100 mt-0.5">
                     {slip.nama_karyawan}

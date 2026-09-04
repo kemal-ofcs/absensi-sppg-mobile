@@ -3,6 +3,7 @@ import { Icon } from "@/components/ui/Icon";
 import { downloadDataUrl } from "@/lib/client/download";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { shareDataUrl } from "@/lib/client/share";
+import { BRANDING } from "@/lib/constants/branding";
 
 interface QrFullscreenDialogProps {
   /** Data URL base64 dari QR Code yang akan ditampilkan. */
@@ -72,7 +73,7 @@ export function QrFullscreenDialog({
     setSharing(true);
     try {
       const title = `QR Code Absensi - ${employeeName}`;
-      const text = `QR Code Absensi SPPG untuk ${employeeName}`;
+      const text = `QR Code ${BRANDING.appDisplayName} untuk ${employeeName}`;
       const res = await shareDataUrl(qrDataUrl, cleanFilename, title, text);
       if (res.sukses) {
         triggerHaptic("success");

@@ -477,6 +477,8 @@ mod tests {
             is_superadmin: false,
             permissions: vec!["scanner.use".into()],
             permission_revision: 4,
+            require_scan_photo: false,
+            require_scan_ip_allowlist: false,
             login_at: None,
         }
     }

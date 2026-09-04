@@ -4,11 +4,15 @@ import Link from "next/link";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { BrandLogo } from "@/components/ui/BrandLogo";
 import { useAuth } from "@/lib/context/AuthContext";
+import { useAppName } from "@/lib/hooks/useAppName";
+import { useCompanyName } from "@/lib/hooks/useCompanyName";
 import { useOnlineStatus } from "@/lib/hooks/useOnlineStatus";
 
 export function MobileHeader() {
   const { user } = useAuth();
   const isOnline = useOnlineStatus();
+  const appName = useAppName();
+  const companyName = useCompanyName();
   if (!user) return null;
 
   return (
@@ -21,8 +25,11 @@ export function MobileHeader() {
         >
           <BrandLogo size={32} />
           <div className="flex flex-col">
-            <span className="text-sm font-black tracking-tight text-white leading-tight">
-              SPPG Mobile
+            <span className="text-xs font-black tracking-tight text-white leading-tight">
+              {appName}
+            </span>
+            <span className="text-[10px] font-semibold text-sky-300 truncate max-w-[120px] leading-none">
+              {companyName}
             </span>
             <div className="flex items-center gap-1.5 text-[10px] font-medium text-slate-400">
               <span

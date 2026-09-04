@@ -28,6 +28,7 @@ const dirsToCopy = [
   "lib/attendance",
   "lib/auth",
   "lib/client",
+  "lib/constants",
   "lib/context",
   "lib/contracts",
   "lib/gateways",
