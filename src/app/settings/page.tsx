@@ -42,6 +42,7 @@ import {
   DATABASE_PROVIDER_OPTIONS,
   type DatabaseProvider,
   describeProvider,
+  providerNeedsEndpoint,
   reviewDatabaseEndpoint,
 } from "@/lib/validations/database-endpoint";
 import { validateGeofenceSettings } from "@/lib/validations/geofence";
@@ -385,14 +386,20 @@ export default function SettingsPage() {
   const handleTursoSave = async () => {
     // Tahan input yang jelas salah di sini supaya alasannya tampil di dekat
     // field, bukan sebagai kegagalan IPC generik setelah penyimpanan.
-    if (!tursoEndpoint.valid) {
+    const needsEndpoint = providerNeedsEndpoint(tursoProvider);
+    if (needsEndpoint && !tursoEndpoint.valid) {
       setSaveMessage(
         tursoEndpoint.issue?.message ?? "URL database tidak dapat dipakai.",
       );
       setTimeout(() => setSaveMessage(""), 4000);
       return;
     }
-    if (tursoEndpoint.tokenRequired && !tursoToken.trim() && !tursoTokenSaved) {
+    if (
+      needsEndpoint &&
+      tursoEndpoint.tokenRequired &&
+      !tursoToken.trim() &&
+      !tursoTokenSaved
+    ) {
       setSaveMessage("Auth Token wajib diisi untuk alamat database ini.");
       setTimeout(() => setSaveMessage(""), 4000);
       return;
@@ -400,10 +407,14 @@ export default function SettingsPage() {
     setTursoBusy(true);
     triggerHaptic("light");
     try {
-      await saveTursoConfig(tursoUrl.trim(), tursoToken.trim(), {
-        provider: tursoProvider,
-        allowInsecureTransport: tursoAllowInsecure,
-      });
+      await saveTursoConfig(
+        needsEndpoint ? tursoUrl.trim() : "",
+        needsEndpoint ? tursoToken.trim() : "",
+        {
+          provider: tursoProvider,
+          allowInsecureTransport: tursoAllowInsecure,
+        },
+      );
       if (tursoToken.trim().length > 0) setTursoTokenSaved(true);
       triggerHaptic("success");
       setSaveMessage(
@@ -910,33 +921,41 @@ export default function SettingsPage() {
                 ))}
               </fieldset>
 
-              <div>
-                <label
-                  htmlFor="turso-url-input"
-                  className="block text-[11px] font-bold text-slate-300 mb-1"
-                >
-                  {tursoProvider === "turso"
-                    ? "URL Database Cloud"
-                    : "Alamat Server Database"}
-                </label>
-                <input
-                  id="turso-url-input"
-                  type="text"
-                  inputMode="url"
-                  value={tursoUrl}
-                  onChange={(e) => {
-                    setTursoUrl(e.target.value);
-                    setTursoTestStatus(null);
-                  }}
-                  placeholder={tursoProviderInfo.urlPlaceholder}
-                  className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-xs font-mono text-white outline-none focus:border-cyan-400"
-                />
-                {tursoUrl.trim().length > 0 && tursoEndpoint.issue ? (
-                  <p className="mt-1 text-[11px] leading-4 text-amber-300">
-                    {tursoEndpoint.issue.message}
-                  </p>
-                ) : null}
-              </div>
+              {providerNeedsEndpoint(tursoProvider) ? (
+                <div>
+                  <label
+                    htmlFor="turso-url-input"
+                    className="block text-[11px] font-bold text-slate-300 mb-1"
+                  >
+                    {tursoProvider === "turso"
+                      ? "URL Database Cloud"
+                      : "Alamat Server Database"}
+                  </label>
+                  <input
+                    id="turso-url-input"
+                    type="text"
+                    inputMode="url"
+                    value={tursoUrl}
+                    onChange={(e) => {
+                      setTursoUrl(e.target.value);
+                      setTursoTestStatus(null);
+                    }}
+                    placeholder={tursoProviderInfo.urlPlaceholder}
+                    className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-xs font-mono text-white outline-none focus:border-cyan-400"
+                  />
+                  {tursoUrl.trim().length > 0 && tursoEndpoint.issue ? (
+                    <p className="mt-1 text-[11px] leading-4 text-amber-300">
+                      {tursoEndpoint.issue.message}
+                    </p>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-cyan-400/30 bg-cyan-400/5 p-2.5 text-[11px] font-bold leading-4 text-cyan-100">
+                  Data disimpan pada berkas SQLite di perangkat ini. Tidak ada
+                  alamat server maupun Auth Token yang perlu diisi, dan aplikasi
+                  berjalan penuh tanpa internet.
+                </div>
+              )}
 
               {tursoProvider === "self_hosted" &&
               (tursoEndpoint.issue?.code === "INSECURE_PUBLIC" ||
@@ -959,37 +978,39 @@ export default function SettingsPage() {
                 </label>
               ) : null}
 
-              <div>
-                <label
-                  htmlFor="turso-token-input"
-                  className="block text-[11px] font-bold text-slate-300 mb-1"
-                >
-                  {tursoEndpoint.tokenRequired
-                    ? "Auth Token Database"
-                    : "Auth Token Database (opsional)"}
-                </label>
-                <div className="relative">
-                  <input
-                    id="turso-token-input"
-                    type={showTursoToken ? "text" : "password"}
-                    value={tursoToken}
-                    onChange={(e) => setTursoToken(e.target.value)}
-                    placeholder={
-                      tursoTokenSaved
-                        ? "•••••••••••••••• (Tersimpan di vault)"
-                        : tursoProviderInfo.tokenPlaceholder
-                    }
-                    className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 pr-16 text-xs font-mono text-white outline-none focus:border-cyan-400"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowTursoToken((prev) => !prev)}
-                    className="absolute right-1.5 top-1.5 rounded-lg bg-white/5 px-2 py-1 text-[10px] font-bold text-slate-300"
+              {providerNeedsEndpoint(tursoProvider) ? (
+                <div>
+                  <label
+                    htmlFor="turso-token-input"
+                    className="block text-[11px] font-bold text-slate-300 mb-1"
                   >
-                    {showTursoToken ? "Tutup" : "Lihat"}
-                  </button>
+                    {tursoEndpoint.tokenRequired
+                      ? "Auth Token Database"
+                      : "Auth Token Database (opsional)"}
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="turso-token-input"
+                      type={showTursoToken ? "text" : "password"}
+                      value={tursoToken}
+                      onChange={(e) => setTursoToken(e.target.value)}
+                      placeholder={
+                        tursoTokenSaved
+                          ? "•••••••••••••••• (Tersimpan di vault)"
+                          : tursoProviderInfo.tokenPlaceholder
+                      }
+                      className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 pr-16 text-xs font-mono text-white outline-none focus:border-cyan-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowTursoToken((prev) => !prev)}
+                      className="absolute right-1.5 top-1.5 rounded-lg bg-white/5 px-2 py-1 text-[10px] font-bold text-slate-300"
+                    >
+                      {showTursoToken ? "Tutup" : "Lihat"}
+                    </button>
+                  </div>
                 </div>
-              </div>
+              ) : null}
 
               {tursoTestStatus ? (
                 <div

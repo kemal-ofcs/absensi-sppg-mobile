@@ -21,6 +21,10 @@ const filesToSync = [
   // menanam shift default. Karena keduanya membangun database Turso yang sama,
   // berkas ini WAJIB identik.
   "turso.rs",
+  // Seam transport SQL. Wajib ikut: ia memuat dekoder sel Hrana yang dipakai
+  // jalur cloud DAN jalur SQLite lokal, sehingga bentuk nilai hasil query di
+  // kedua platform tidak boleh berbeda satu tipe pun.
+  "sql_backend.rs",
   // Sumber kebenaran tunggal untuk timestamp absensi: penentuan tanggal kerja,
   // jendela scan pulang, deteksi shift fleksibel, dan cutoff Generate Alfa.
   // Berkas ini dulu dipelihara terpisah di kedua workspace tanpa alat apa pun
