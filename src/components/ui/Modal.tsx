@@ -1,6 +1,6 @@
 "use client";
 
-import { type KeyboardEvent, type ReactNode, useEffect } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useRef } from "react";
 
 interface ModalProps {
   isOpen: boolean;
@@ -23,19 +23,24 @@ export function Modal({
   maxWidth = "max-w-lg",
   hideFooter = false,
 }: ModalProps) {
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onCloseRef.current();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
   const handleContainerKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape") onClose();
+    if (event.key === "Escape") onCloseRef.current();
   };
 
   return (

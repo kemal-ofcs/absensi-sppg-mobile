@@ -142,6 +142,11 @@ textarea {
    */
   --color-white: #0f172a;
 
+  /* Skala amber di tema terang agar teks peringatan & recovery codes tajam terbaca */
+  --color-amber-100: #78350f;
+  --color-amber-200: #92400e;
+  --color-amber-300: #b45309;
+
   /* Token aplikasi (dipakai html/body dan ::selection). */
   --app-background: #f8fafc;
   --app-background-soft: #eef2f7;

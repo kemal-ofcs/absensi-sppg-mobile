@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-export-database-to-device"
+description = "Enables the desktop_export_database_to_device command without any pre-configured scope."
+commands.allow = ["desktop_export_database_to_device"]
+
+[[permission]]
+identifier = "deny-desktop-export-database-to-device"
+description = "Denies the desktop_export_database_to_device command without any pre-configured scope."
+commands.deny = ["desktop_export_database_to_device"]

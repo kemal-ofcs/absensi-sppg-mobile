@@ -13,6 +13,7 @@ pub mod sync;
 mod time_policy;
 pub mod turso;
 
+pub mod portability;
 pub mod payroll;
 pub mod share;
 pub use config::MobileState;

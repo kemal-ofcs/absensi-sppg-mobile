@@ -25,6 +25,7 @@ import { requestScreenWakeLock } from "@/lib/client/wakelock";
 import type { ScanResult, ScanTerminalInput } from "@/lib/contracts/scanner";
 import { getScanSecurity } from "@/lib/gateways/scan-security";
 import { submitTerminalScan } from "@/lib/gateways/scanner";
+import { requestSyncNow } from "@/lib/gateways/sync-status";
 
 type ScanLogItem = {
   id: string;
@@ -214,6 +215,20 @@ export function ScannerView() {
 
         const result = await submitTerminalScan(payload);
         setLastResult(result);
+
+        // Bangunkan siklus sinkronisasi, JANGAN menunggu jadwal berikutnya.
+        //
+        // Absensi adalah satu-satunya mutasi bervolume tinggi yang tidak punya
+        // pemicu push sendiri: hanya lima perintah pengaturan yang memanggil
+        // `push_outbox` langsung, dan jalur ini tidak termasuk. Tanpa panggilan
+        // ini sebuah scan menunggu sampai 30 detik sebelum terkirim — dan pada
+        // terminal yang jendelanya tersembunyi, sampai 90 detik.
+        //
+        // Sengaja LEPAS dari alur scan (tidak di-`await`) supaya tidak menambah
+        // satu milidetik pun ke waktu respons terminal, dan sudah di-throttle
+        // 5 detik oleh AutoSyncRunner sehingga antrean panjang saat jam masuk
+        // tidak berubah menjadi badai siklus.
+        if (result.sukses) requestSyncNow();
 
         const isSuccess = Boolean(result.sukses);
 

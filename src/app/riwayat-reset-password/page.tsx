@@ -8,9 +8,11 @@ import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
 import {
+  approvePasswordReset,
   deletePasswordResetHistory,
   getPasswordResetHistory,
   getPasswordResetPhoto,
+  type ResetApprovalResult,
 } from "@/lib/gateways/password-reset-history";
 import {
   RESET_HISTORY_STATUS_HINT,
@@ -62,6 +64,7 @@ export default function RiwayatResetPasswordMobilePage() {
 
   const canView = canAccessArea(user, "password_reset");
   const canDelete = hasPermission(user, "password_reset.delete");
+  const canApprove = hasPermission(user, "password_reset.approve");
 
   const [entries, setEntries] = useState<ResetHistoryEntry[]>([]);
   const [status, setStatus] = useState<StatusFilter>("SEMUA");
@@ -78,6 +81,7 @@ export default function RiwayatResetPasswordMobilePage() {
   const [confirmDelete, setConfirmDelete] = useState<ResetHistoryEntry | null>(
     null,
   );
+  const [approval, setApproval] = useState<ResetApprovalResult | null>(null);
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) router.replace("/login");
@@ -140,6 +144,31 @@ export default function RiwayatResetPasswordMobilePage() {
           error instanceof Error
             ? error.message
             : "Riwayat tidak dapat dihapus.",
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Setujui permintaan, lalu tampilkan kodenya.
+   *
+   * Kode ini tidak disimpan dalam bentuk asli di mana pun — database hanya
+   * memegang hash-nya — sehingga layar ini satu-satunya kesempatan membacanya.
+   */
+  const approve = async (entry: ResetHistoryEntry) => {
+    setBusy(true);
+    triggerHaptic("light");
+    try {
+      setApproval(await approvePasswordReset(entry.id));
+      await load();
+    } catch (error) {
+      setMessage({
+        tone: "error",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Permintaan tidak dapat disetujui.",
       });
     } finally {
       setBusy(false);
@@ -303,6 +332,19 @@ export default function RiwayatResetPasswordMobilePage() {
                       </p>
                     ) : null}
 
+                    {canApprove &&
+                    entry.deliveryStatus === "Menunggu Persetujuan" &&
+                    entry.status === "Menunggu Verifikasi" ? (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void approve(entry)}
+                        className="mt-3 min-h-11 w-full rounded-xl bg-emerald-500 px-3 text-xs font-black text-slate-950 shadow-md transition hover:bg-emerald-400 active:scale-95 disabled:opacity-50"
+                      >
+                        Setujui pemulihan
+                      </button>
+                    ) : null}
+
                     <div className="mt-3 flex gap-2">
                       {entry.hasPhoto ? (
                         <button
@@ -340,6 +382,33 @@ export default function RiwayatResetPasswordMobilePage() {
           </>
         )}
       </div>
+
+      {approval ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4">
+          <div className="w-full max-w-sm rounded-3xl border border-emerald-400/30 bg-slate-900 p-5 shadow-2xl">
+            <h2 className="text-sm font-black text-white">Kode pemulihan</h2>
+            <p className="mt-2 text-xs leading-5 text-slate-400">
+              Serahkan kode ini kepada{" "}
+              <strong className="text-white">{approval.namaOperator}</strong>{" "}
+              secara langsung. Berlaku {approval.berlakuMenit} menit dan hanya
+              bisa dipakai sekali.
+            </p>
+            <p className="mt-3 select-all break-all rounded-2xl border border-emerald-400/30 bg-emerald-400/10 p-3 text-center font-mono text-sm font-black tracking-wider text-emerald-100">
+              {approval.token}
+            </p>
+            <p className="mt-2 text-[11px] leading-4 text-amber-300">
+              Tidak tersimpan dan tidak dapat ditampilkan ulang.
+            </p>
+            <button
+              type="button"
+              onClick={() => setApproval(null)}
+              className="mt-4 min-h-11 w-full rounded-xl bg-white/10 text-xs font-black text-slate-200"
+            >
+              Saya sudah menyerahkan kodenya
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {photo ? (
         <div className="fixed inset-0 z-[80] flex items-end justify-center bg-slate-950/90 p-4 backdrop-blur-sm">

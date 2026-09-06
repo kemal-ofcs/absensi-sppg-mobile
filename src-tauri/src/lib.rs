@@ -12,6 +12,16 @@ pub fn run() {
                     .level(log::LevelFilter::Info)
                     .build(),
             )?;
+            // Storage Access Framework, hanya pada build Android.
+            //
+            // Ini yang membuat "Simpan cadangan" benar-benar sampai ke tangan
+            // pengguna: sejak Android 10 (scoped storage) aplikasi tidak boleh
+            // lagi menulis ke /storage/emulated/0/Download, sehingga berkas
+            // cadangan tersimpan di folder privat dan tidak pernah ditemukan
+            // siapa pun. Dengan SAF, penggunalah yang memilih tujuannya dan
+            // izin diberikan per berkas — tanpa satu pun permission manifest.
+            #[cfg(target_os = "android")]
+            app.handle().plugin(tauri_plugin_android_fs::init())?;
             app.manage(mobile::MobileState::initialize(app.handle())?);
             Ok(())
         })
@@ -24,6 +34,9 @@ pub fn run() {
             mobile::commands::desktop_link_bootstrap_database,
             mobile::commands::desktop_login,
             mobile::commands::desktop_logout,
+            mobile::commands::desktop_password_reset_approve,
+            mobile::commands::desktop_password_recovery_with_code,
+            mobile::commands::desktop_password_reset_route,
             mobile::commands::desktop_list_password_reset_history,
             mobile::commands::desktop_get_password_reset_photo,
             mobile::commands::desktop_delete_password_reset_history,
@@ -44,6 +57,7 @@ pub fn run() {
             mobile::commands::desktop_get_mail_config,
             mobile::commands::desktop_save_mail_config,
             mobile::commands::desktop_get_two_factor_status,
+            mobile::commands::desktop_issue_recovery_codes,
             mobile::commands::desktop_begin_two_factor_setup,
             mobile::commands::desktop_confirm_two_factor_setup,
             mobile::commands::desktop_disable_two_factor,
@@ -100,8 +114,13 @@ pub fn run() {
             mobile::commands::desktop_resolve_sync_conflicts,
             mobile::commands::desktop_resolve_sync_conflicts_local,
             mobile::commands::desktop_clear_failed_sync,
+            mobile::commands::desktop_export_database,
+            mobile::commands::desktop_import_database,
+            mobile::commands::desktop_import_database_bytes,
+            mobile::commands::desktop_get_data_folder,
             mobile::commands::desktop_save_file,
             mobile::share::desktop_share_file,
+            mobile::share::mobile_export_database_to_device,
             mobile::commands::desktop_get_holidays,
             mobile::commands::desktop_get_holiday_whitelist,
             mobile::commands::desktop_create_holiday_whitelist,

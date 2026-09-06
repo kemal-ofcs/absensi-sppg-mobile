@@ -3,8 +3,10 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { DatabaseBackupCard } from "@/components/DatabaseBackupCard";
 import { MailSettingsCard } from "@/components/MailSettingsCard";
 import { MobileAppShell } from "@/components/MobileAppShell";
+import { PasswordRecoveryCard } from "@/components/PasswordRecoveryCard";
 import { ThemeSettingsCard } from "@/components/ThemeSettingsCard";
 import { TwoFactorCard } from "@/components/TwoFactorCard";
 import { Icon } from "@/components/ui/Icon";
@@ -669,6 +671,7 @@ export default function SettingsPage() {
         {/* Keamanan akun sendiri: tidak dijaga izin apa pun, karena setiap
             operator berhak mengamankan akunnya. */}
         <TwoFactorCard />
+        <PasswordRecoveryCard />
 
         {/* Riwayat Reset Password (butuh izin password_reset.view) */}
         {canViewResetHistory ? (
@@ -1056,6 +1059,10 @@ export default function SettingsPage() {
               </div>
             </div>
           </div>
+        ) : null}
+
+        {user?.isSuperadmin ? (
+          <DatabaseBackupCard provider={tursoProvider} />
         ) : null}
 
         {/* Pusat Sinkronisasi Shortcut */}

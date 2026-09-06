@@ -31,6 +31,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
    - Support Safe Area Insets (`env(safe-area-inset-top)`, `env(safe-area-inset-bottom)`).
    - Minimum touch-target size: `44x44px`.
    - Prevent virtual keyboard overlap and keep bottom navigation accessible.
+   - In dialogs/modals (`Modal`), callback props (`onClose`) MUST be stabilized via `useRef` (`onCloseRef.current = onClose`) to prevent event listener churn on each keystroke and prevent focus-stealing bugs.
 8. **Immersive 3D & Motion UI on Android/iOS WebView**:
    - **Approved stack only**: `three` + `@react-three/fiber` (v9+) + `@react-three/drei`, `@splinetool/react-spline`, `motion` (Framer Motion), `@rive-app/react-canvas`, `detect-gpu`, `zustand`, Draco / `@gltf-transform/*` (devDependency only), plus vendored Aceternity UI & Magic UI. Same pinned versions as `web-desktop/`. Anything else needs explicit USER approval.
    - **Never mount a `<Canvas>`/Spline scene while the scanner camera is live.** GPU video decoding plus 3D rendering overheats mid-range Android devices, drops frames, and can kill the camera stream — the exact regression rule 4.7 exists to prevent. Scanner decoration is limited to Motion/CSS 2D effects.
@@ -39,3 +40,22 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
    - **Memory**: one live WebGL context at a time; on unmount dispose geometry/material/texture, call `gl.dispose()` and `forceContextLoss()`, and handle `webglcontextlost`. Cleanup lives in its own `useEffect` with an empty dependency array, exactly like the camera rule.
    - **Touch ergonomics**: no pointer-tracking 3D tilt on primary interactive elements (scan button, list rows, form fields); keep `44x44px` targets; glow/aurora/meteor effects must never cover the bottom nav or safe-area insets; avoid heavy `backdrop-filter` behind long scrolling lists.
    - Visual tier lives in `localStorage` (`sppg.visual.tier`), never in a synced table. `src/components/visual/` and `src/lib/stores/` are generated copies from `web-desktop/` — register them in `scripts/sync-frontend-lib.ts` and never hand-edit them. Full contract: `.agents/skills/absensi-sppg-rules/references/07-immersive-3d-ui-ux.md`.
+9. **Light/Dark Theme Harmony & Symmetric Tone Inversion**:
+   - **Base JSX is Dark Mode**: Always use dark base classes (`bg-slate-900`, `bg-slate-950`, `text-white`, `text-slate-400`, `border-white/10`). NEVER put inline light base classes (`bg-white dark:...`).
+   - **Mobile Variable Inversion**: Light mode is handled via `:root[data-theme="light"]` CSS variables. When adding accent text (`text-amber-100`, etc.), ensure matching variables (`--color-amber-100: #78350f`, etc.) are mapped so text is never pale/invisible against light surfaces.
+   - **Semantic Classes for Critical Elements**: Critical components (recovery code pills, bootstrap panels, modals) MUST carry dedicated semantic classes with explicit styles for both themes.
+10. **Mode Database Lokal (offline-first tanpa server)**:
+   - Provider ada **TIGA**, bukan dua: `turso`, `self_hosted`, dan `local_file`. Nilainya disimpan eksplisit di `TursoConfig.provider` dan TIDAK PERNAH ditebak dari bentuk URL. `normalize_database_url` di `turso.rs` adalah satu-satunya gerbangnya.
+   - Pada `local_file` yang ditukar hanya **transport**-nya (`LocalTransport` di `sql_backend.rs`), bukan SQL-nya. `ensure_schema()` yang sama membangun database cloud maupun berkas lokal, sehingga drift antara keduanya mustahil secara struktural.
+   - Perangkat memegang **DUA berkas terpisah**: `desktop-security.db` (operasional + outbox) dan `sppg-hub.db` (berperan sebagai cloud). Mutasi lokal hanya menyentuh yang pertama; hub baru terisi lewat `push_outbox`.
+   - `export_database` dan promosi ke cloud sama-sama membaca **hub**. Outbox yang tidak terkuras berarti cadangan dan migrasi kehilangan data tanpa satu pun pesan error — karena itu mesin sinkronisasi TETAP WAJIB berjalan di mode lokal.
+   - Formulir provisioning mode ini sengaja tidak punya kolom alamat, jadi provider WAJIB ditentukan SEBELUM alamat kosong ditolak.
+11. **Android Scoped Storage & Perintah Khusus Mobile**:
+   - DILARANG menulis langsung ke `/storage/emulated/0/Download`. Sejak Android 10 penulisan itu ditolak dan gagal secara DIAM: berkas tetap dibuat di folder privat, pemanggil melapor sukses, pengguna tidak pernah menemukannya.
+   - Berkas untuk pengguna diserahkan lewat dialog Storage Access Framework (`tauri-plugin-android-fs`, di-`cfg` khusus Android). WAJIB `android_fs_async()`, bukan `android_fs()` — dialognya menunggu manusia dan memblokir thread runtime akan membekukan antarmuka termasuk dialog itu sendiri. Pengguna yang menutup dialog adalah PEMBATALAN, bukan kegagalan.
+   - Perintah yang hanya ada di biner Mobile hidup di modul di luar daftar salin `sync-rust-modules.ts` dan namanya WAJIB berawalan `mobile_`; di gateway bersama dipanggil dari dalam blok `if (isMobileRuntime()) { … }` (guard POSITIF). Keduanya adalah bentuk yang dikenali `audit:contract`.
+12. **Pemulihan Password: TIGA jalur, jangan asumsikan email**:
+   - Jalurnya `email`, `in_app` (persetujuan peninjau), dan kode pemulihan cetak. Pemilihnya `password_reset_route` / `resolvePasswordResetRoute`; nilai eksplisit di `setting_gex_system` menang lebih dulu, baru `app_mail_config.is_active` sebagai bawaan — urutan ini tidak boleh dibalik.
+   - Pada jalur `in_app`, `verify` TIDAK membuat token; token lahir di layar peninjau saat `approve`. Versi yang selalu mengirim email membuat "Lupa Password" mati total di setiap pemasangan tanpa konfigurasi email.
+   - `password_reset.approve` masuk `SENSITIVE_MUTATION_PERMISSIONS` bersama `password_reset.delete`.
+   - `generateRecoveryCodes`/`normalizeRecoveryCode` (TS) dan padanan Rust-nya wajib tetap identik, termasuk membuang setiap karakter non-alfanumerik.

@@ -112,6 +112,19 @@ pub struct MobileSyncStatus {
     /// Nol berarti data lokal sudah identik dengan cloud, sehingga UI tidak
     /// perlu memuat ulang apa pun.
     pub changed_rows: i64,
+    /// Perangkat ini memakai Mode Database Lokal (`local_file`).
+    ///
+    /// `models.rs` TIDAK ikut disalin `sync-rust-modules.ts`, sedangkan
+    /// `sync.rs` ikut — jadi setiap field baru pada struct ini wajib ditambahkan
+    /// manual di sini, atau build Mobile gagal begitu salinan `sync.rs` yang
+    /// baru masuk.
+    ///
+    /// Pemakainya: `AutoSyncRunner` melewatkan siklus ketika peramban melapor
+    /// `navigator.onLine === false`. Penjagaan itu benar untuk mode cloud, tetapi
+    /// SALAH di mode lokal — di sana push adalah operasi berkas, bukan jaringan.
+    /// Tanpa bendera ini outbox tidak pernah terkuras, hub tertinggal, lalu
+    /// cadangan dan promosi ke cloud kehilangan data tanpa pesan apa pun.
+    pub local_mode: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

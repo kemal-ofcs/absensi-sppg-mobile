@@ -25,6 +25,10 @@ const filesToSync = [
   // jalur cloud DAN jalur SQLite lokal, sehingga bentuk nilai hasil query di
   // kedua platform tidak boleh berbeda satu tipe pun.
   "sql_backend.rs",
+  // Ekspor/impor berkas hub. Ikut disinkronkan supaya aturan validasi cadangan
+  // — versi skema, integritas, dan penolakan database asing — tidak pernah
+  // berbeda antara Desktop dan Mobile.
+  "portability.rs",
   // Sumber kebenaran tunggal untuk timestamp absensi: penentuan tanggal kerja,
   // jendela scan pulang, deteksi shift fleksibel, dan cutoff Generate Alfa.
   // Berkas ini dulu dipelihara terpisah di kedua workspace tanpa alat apa pun

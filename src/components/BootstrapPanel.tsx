@@ -73,6 +73,11 @@ export function BootstrapPanel({
   const [confirmation, setConfirmation] = useState("");
   const [feedback, setFeedback] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  /**
+   * Kode pemulihan Superadmin, ditahan di layar sampai pengguna menyatakan
+   * sudah menyimpannya. Tidak ada kesempatan kedua untuk membacanya.
+   */
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
   const [checking, setChecking] = useState(false);
   const [linking, setLinking] = useState(false);
   const [check, setCheck] = useState<DatabaseCheckResult | null>(null);
@@ -190,7 +195,7 @@ export function BootstrapPanel({
     setSubmitting(true);
     setFeedback("");
     try {
-      await bootstrapSuperadmin({
+      const codes = await bootstrapSuperadmin({
         kodeOperator: "SPD001",
         namaOperator: name,
         username,
@@ -205,6 +210,12 @@ export function BootstrapPanel({
       setPassword("");
       setConfirmation("");
       setAuthToken("");
+      // Kode pemulihan ditahan di layar lebih dulu: memanggil onCompleted()
+      // sekarang membuang satu-satunya kesempatan membacanya.
+      if (codes.length > 0) {
+        setRecoveryCodes(codes);
+        return;
+      }
       onCompleted();
     } catch (error: unknown) {
       setFeedback(
@@ -216,6 +227,51 @@ export function BootstrapPanel({
       setSubmitting(false);
     }
   };
+
+  // Layar kode pemulihan MENGGANTIKAN formulir. Ini satu-satunya kesempatan
+  // membaca kodenya, jadi tidak boleh ada tombol lain yang menggoda pengguna
+  // melewatinya.
+  if (recoveryCodes) {
+    return (
+      <main className="grid min-h-dvh place-items-center bg-slate-950 p-4 text-slate-100">
+        <section className="max-h-[92dvh] w-full max-w-md touch-pan-y overflow-y-auto overscroll-contain rounded-3xl border border-amber-400/30 bg-slate-900 p-6 shadow-2xl">
+          <p className="text-xs font-black uppercase tracking-[0.18em] text-amber-300">
+            Simpan kode pemulihan
+          </p>
+          <h1 className="mt-2 text-xl font-black text-white">
+            Salin atau catat sekarang
+          </h1>
+          <p className="mt-2 text-xs leading-5 text-slate-400">
+            Akun Superadmin tidak punya siapa pun di atasnya untuk menyetujui
+            pemulihan. Kode ini jalan masuk terakhir bila passwordnya terlupa —
+            terutama pada pemasangan tanpa internet.
+          </p>
+          <ul className="mt-4 grid grid-cols-2 gap-2">
+            {recoveryCodes.map((code) => (
+              <li
+                key={code}
+                className="select-all rounded-xl border border-amber-400/25 bg-amber-400/10 px-2 py-2 text-center font-mono text-xs font-black tracking-wider text-amber-100"
+              >
+                {code}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-[11px] font-bold leading-4 text-rose-200">
+            Tidak tersimpan dalam bentuk aslinya dan tidak dapat ditampilkan
+            ulang. Setiap kode berlaku sekali. Simpan di tempat yang berbeda
+            dari perangkat ini.
+          </p>
+          <button
+            type="button"
+            onClick={onCompleted}
+            className="mt-4 min-h-11 w-full rounded-xl bg-amber-400 text-xs font-black text-slate-950 active:scale-95 transition"
+          >
+            Saya sudah menyimpannya, lanjutkan
+          </button>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="grid min-h-dvh place-items-center bg-slate-950 p-4 text-slate-100">
