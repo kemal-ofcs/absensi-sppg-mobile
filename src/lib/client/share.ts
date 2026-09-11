@@ -109,6 +109,8 @@ export async function shareDataUrl(
 
   // 4. Fallback: Simpan ke media penyimpanan lokal
   const downloadRes = await downloadDataUrl(dataUrl, filename);
+  // Di Android ini membuka dialog "Simpan ke…"; menutupnya = pembatalan.
+  if (downloadRes.cancelled) return { sukses: false, cancelled: true };
   return {
     sukses: downloadRes.sukses,
     message: downloadRes.path
@@ -146,7 +148,9 @@ export async function shareText(
         message: "Teks slip berhasil disalin ke clipboard.",
       };
     } catch {
-      // ignore
+      // Clipboard ditolak (izin/konteks tidak aman) bukan akhir jalan: baris
+      // di bawah tetap mengembalikan sukses=false beserta pesan yang tampil
+      // ke pengguna, jadi kegagalannya tidak disembunyikan.
     }
   }
 

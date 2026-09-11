@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Icon } from "@/components/ui/Icon";
+import { canAccessArea } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { shareText } from "@/lib/client/share";
 import { useAuth } from "@/lib/context/AuthContext";
@@ -63,7 +64,7 @@ export default function SlipDetailClient() {
   const router = useRouter();
   const params = useParams();
   const slipId = String(params?.id || "");
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
   const companyName = useCompanyName();
 
   const [slip, setSlip] = useState<MobileSlipDetail | null>(null);
@@ -100,8 +101,15 @@ export default function SlipDetailClient() {
       router.push("/login");
       return;
     }
+    // Otorisasi, bukan sekadar autentikasi: `mobile_get_payroll_slip_detail`
+    // di Rust tidak memeriksa izin sama sekali, jadi gerbang ini satu-satunya
+    // yang menghalangi operator tanpa akses payroll membuka slip orang lain.
+    if (!canAccessArea(user, "payroll")) {
+      router.replace("/dashboard");
+      return;
+    }
     void loadSlip();
-  }, [isHydrated, authLoading, isAuthenticated, loadSlip, router]);
+  }, [isHydrated, authLoading, isAuthenticated, user, loadSlip, router]);
 
   const handleShare = async () => {
     if (!slip) return;

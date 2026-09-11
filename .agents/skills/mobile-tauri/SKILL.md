@@ -13,7 +13,7 @@ This skill documents mandatory standards, hardware guards, and architectural pat
 ---
 
 ## 1. Zero-Drift Database Architecture
-- **Private SQLite Storage**: The database resides in `app.path().app_local_data_dir()`, isolated inside the Android app sandbox (`/data/user/0/id.sppg.absensi.mobile/files/`).
+- **Private SQLite Storage**: The database resides in `app.path().app_local_data_dir()`, isolated inside the Android app sandbox (`/data/user/0/id.absensi.perusahaan.mobile/files/`).
 - **PRAGMA Settings**:
   ```sql
   PRAGMA foreign_keys = ON;

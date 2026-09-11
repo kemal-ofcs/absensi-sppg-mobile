@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { EmployeeBulkActions } from "@/components/karyawan/EmployeeBulkActions";
 import { EmployeeCard } from "@/components/karyawan/EmployeeCard";
 import { EmployeeDetailModal } from "@/components/karyawan/EmployeeDetailModal";
 import { EmployeeFormModal } from "@/components/karyawan/EmployeeFormModal";
@@ -279,6 +280,26 @@ export default function KaryawanPage() {
         ) : null}
       </div>
 
+      {/* ── Aksi Massal: impor Excel & generate QR (employees.manage) ── */}
+      {canManage ? (
+        <EmployeeBulkActions
+          exportRows={filteredEmployees}
+          onCompleted={(message) => {
+            setErrorMsg(null);
+            setSuccessMsg(message);
+            void loadData(true);
+          }}
+          onInfo={(message) => {
+            setErrorMsg(null);
+            setSuccessMsg(message);
+          }}
+          onError={(message) => {
+            setSuccessMsg(null);
+            setErrorMsg(message);
+          }}
+        />
+      ) : null}
+
       {/* ── Kolom Pencarian ── */}
       <div className="relative mb-3">
         <Icon
@@ -286,6 +307,7 @@ export default function KaryawanPage() {
           className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-slate-400"
         />
         <input
+          aria-label="Cari karyawan"
           id="search-karyawan"
           type="search"
           value={search}
@@ -389,7 +411,9 @@ export default function KaryawanPage() {
             <p className="text-[11px] text-slate-500 mt-1">
               {search || filterStatus || filterBackup
                 ? "Coba ubah filter atau kata kunci pencarian"
-                : "Tambah karyawan baru dari Desktop terlebih dahulu"}
+                : canManage
+                  ? "Tambah lewat tombol + atau impor dari berkas Excel/CSV"
+                  : "Belum ada karyawan yang terdaftar"}
             </p>
           </div>
           {search || filterStatus || filterBackup ? (

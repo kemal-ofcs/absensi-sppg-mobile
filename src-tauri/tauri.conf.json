@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "absensi-sppg-mobile",
+  "productName": "Absensi Perusahaan",
   "version": "0.1.0",
-  "identifier": "id.sppg.absensi.mobile",
+  "identifier": "id.absensi.perusahaan.mobile",
   "build": {
     "frontendDist": "../out",
     "devUrl": "http://localhost:3000",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Absensi SPPG Mobile",
+        "title": "Absensi Perusahaan",
         "width": 430,
         "height": 932,
         "resizable": true,

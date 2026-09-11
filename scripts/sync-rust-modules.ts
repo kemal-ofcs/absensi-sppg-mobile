@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const desktopDir = join(__dirname, "../../web-desktop/src-tauri/src/desktop");
@@ -37,12 +37,9 @@ const filesToSync = [
   "time_policy.rs",
 ];
 
-for (const file of filesToSync) {
-  const srcPath = join(desktopDir, file);
-  let content = readFileSync(srcPath, "utf-8");
-
-  // Adapt Desktop types to Mobile types
-  content = content
+/** Sesuaikan tipe & jalur modul Desktop ke padanan Mobile. */
+function adaptToMobile(content: string) {
+  return content
     .replaceAll("DesktopState", "MobileState")
     .replaceAll("DesktopSyncStatus", "MobileSyncStatus")
     .replaceAll("DesktopLoginResult", "MobileLoginResult")
@@ -52,8 +49,29 @@ for (const file of filesToSync) {
     .replaceAll("crate::desktop::", "crate::mobile::")
     .replaceAll("use crate::desktop", "use crate::mobile")
     .replaceAll("super::super::desktop", "super::super::mobile");
+}
 
+for (const file of filesToSync) {
+  const srcPath = join(desktopDir, file);
+  const content = adaptToMobile(readFileSync(srcPath, "utf-8"));
   const destPath = join(mobileDir, file);
   writeFileSync(destPath, content, "utf-8");
   console.log(`Synced ${file} to ${destPath}`);
+}
+
+// Administrasi payroll (konfigurasi gaji, aturan pajak/BPJS/lembur, payroll
+// run). Menyangkut UANG, jadi satu implementasi saja: modul Desktop disalin
+// apa adanya, tidak pernah ditulis ulang di Mobile. Tujuannya `payroll_admin/`
+// karena `mobile/payroll.rs` sudah dipakai command baca-saja `mobile_*`
+// (slip & estimasi karyawan). Command-nya tetap bernama `desktop_*` supaya
+// gateway `payroll.ts` yang sama dipakai kedua build tanpa cabang baru.
+const payrollAdminFiles = ["mod.rs", "commands.rs", "engine.rs", "models.rs"];
+const payrollAdminDest = join(mobileDir, "payroll_admin");
+mkdirSync(payrollAdminDest, { recursive: true });
+for (const file of payrollAdminFiles) {
+  const srcPath = join(desktopDir, "payroll", file);
+  const content = adaptToMobile(readFileSync(srcPath, "utf-8"));
+  const destPath = join(payrollAdminDest, file);
+  writeFileSync(destPath, content, "utf-8");
+  console.log(`Synced payroll/${file} to ${destPath}`);
 }

@@ -1,9 +1,10 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
+import { Modal } from "@/components/ui/Modal";
 import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
@@ -12,6 +13,7 @@ import {
   deletePasswordResetHistory,
   getPasswordResetHistory,
   getPasswordResetPhoto,
+  purgePasswordResetHistory,
   type ResetApprovalResult,
 } from "@/lib/gateways/password-reset-history";
 import {
@@ -32,6 +34,15 @@ const STATUS_STYLE: Record<ResetHistoryStatus, string> = {
 };
 
 const FILTERS: StatusFilter[] = ["SEMUA", ...RESET_HISTORY_STATUSES];
+
+/** Batas umur riwayat yang dibersihkan — sama dengan halaman Web/Desktop. */
+const PURGE_DAYS = 90;
+
+const MESSAGE_STYLE = {
+  success: "border-emerald-400/25 bg-emerald-400/10 text-emerald-200",
+  warning: "border-amber-400/25 bg-amber-400/10 text-amber-200",
+  error: "border-rose-400/25 bg-rose-400/10 text-rose-200",
+} as const;
 
 /**
  * Stempel waktu ditulis SQLite dalam UTC ("2026-08-29 10:15:00"). `new Date()`
@@ -59,6 +70,12 @@ function formatScore(score: number | null) {
 }
 
 export default function RiwayatResetPasswordMobilePage() {
+  // Penjaga anti klik ganda (Aturan 5). `useState` tidak cukup: pembaruannya
+  // dijadwalkan, sehingga dua klik dalam satu tick React sama-sama membaca
+  // nilai lama dan keduanya lolos. Dideklarasikan di ATAS, sebelum setiap
+  // early return, supaya urutan hook tidak pernah berubah antar-render.
+  const isSubmittingRef = useRef(false);
+
   const router = useRouter();
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
 
@@ -71,9 +88,10 @@ export default function RiwayatResetPasswordMobilePage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{
-    tone: "success" | "error";
+    tone: keyof typeof MESSAGE_STYLE;
     text: string;
   } | null>(null);
+  const [purgeOpen, setPurgeOpen] = useState(false);
   const [photo, setPhoto] = useState<{
     entry: ResetHistoryEntry;
     src: string;
@@ -84,8 +102,16 @@ export default function RiwayatResetPasswordMobilePage() {
   const [approval, setApproval] = useState<ResetApprovalResult | null>(null);
 
   useEffect(() => {
-    if (!authLoading && !isAuthenticated) router.replace("/login");
-  }, [authLoading, isAuthenticated, router]);
+    if (!authLoading && !isAuthenticated) {
+      router.replace("/login");
+      return;
+    }
+    // Ditolak izin area: dipulangkan, sama seperti Project Meksa. Mobile
+    // memakai static export dan tidak punya rute `/forbidden`.
+    if (!authLoading && isAuthenticated && !canView) {
+      router.replace("/dashboard");
+    }
+  }, [authLoading, isAuthenticated, canView, router]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -127,8 +153,10 @@ export default function RiwayatResetPasswordMobilePage() {
   };
 
   const runDelete = async () => {
+    if (isSubmittingRef.current) return;
     if (!confirmDelete) return;
     setBusy(true);
+    isSubmittingRef.current = true;
     try {
       await deletePasswordResetHistory(confirmDelete.id);
       setMessage({
@@ -146,6 +174,40 @@ export default function RiwayatResetPasswordMobilePage() {
             : "Riwayat tidak dapat dihapus.",
       });
     } finally {
+      isSubmittingRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Hapus massal riwayat lama yang sudah SELESAI (Terpakai, Kedaluwarsa,
+   * Dibatalkan) beserta fotonya. Pengajuan yang masih berjalan tidak tersentuh.
+   */
+  const runPurge = async () => {
+    if (isSubmittingRef.current) return;
+    setBusy(true);
+    isSubmittingRef.current = true;
+    try {
+      const result = await purgePasswordResetHistory(PURGE_DAYS);
+      triggerHaptic(result.deleted > 0 ? "success" : "light");
+      setPurgeOpen(false);
+      setMessage({
+        tone: result.deleted > 0 ? "success" : "warning",
+        text:
+          result.deleted > 0
+            ? `${result.deleted} riwayat lama berhasil dibersihkan.`
+            : `Tidak ada riwayat selesai yang lebih tua dari ${PURGE_DAYS} hari.`,
+      });
+      await load();
+    } catch (error) {
+      triggerHaptic("error");
+      setMessage({
+        tone: "error",
+        text:
+          error instanceof Error ? error.message : "Pembersihan riwayat gagal.",
+      });
+    } finally {
+      isSubmittingRef.current = false;
       setBusy(false);
     }
   };
@@ -157,8 +219,10 @@ export default function RiwayatResetPasswordMobilePage() {
    * memegang hash-nya — sehingga layar ini satu-satunya kesempatan membacanya.
    */
   const approve = async (entry: ResetHistoryEntry) => {
+    if (isSubmittingRef.current) return;
     setBusy(true);
     triggerHaptic("light");
+    isSubmittingRef.current = true;
     try {
       setApproval(await approvePasswordReset(entry.id));
       await load();
@@ -171,6 +235,7 @@ export default function RiwayatResetPasswordMobilePage() {
             : "Permintaan tidak dapat disetujui.",
       });
     } finally {
+      isSubmittingRef.current = false;
       setBusy(false);
     }
   };
@@ -225,11 +290,7 @@ export default function RiwayatResetPasswordMobilePage() {
               <button
                 type="button"
                 onClick={() => setMessage(null)}
-                className={`rounded-2xl border p-3 text-left text-[11px] leading-4 ${
-                  message.tone === "success"
-                    ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-200"
-                    : "border-rose-400/25 bg-rose-400/10 text-rose-200"
-                }`}
+                className={`rounded-2xl border p-3 text-left text-[11px] leading-4 ${MESSAGE_STYLE[message.tone]}`}
               >
                 {message.text}
               </button>
@@ -254,6 +315,21 @@ export default function RiwayatResetPasswordMobilePage() {
                 </button>
               ))}
             </div>
+
+            {canDelete ? (
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic("warning");
+                  setPurgeOpen(true);
+                }}
+                disabled={busy}
+                className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-rose-400/30 bg-rose-400/10 text-xs font-black text-rose-200 transition active:scale-95 disabled:opacity-50"
+              >
+                <Icon name="trash" className="size-4" />
+                Bersihkan riwayat &gt; {PURGE_DAYS} hari
+              </button>
+            ) : null}
 
             {loading ? (
               <div className="grid min-h-40 place-items-center rounded-3xl border border-white/10 bg-slate-900/70 text-xs text-slate-400">
@@ -384,10 +460,16 @@ export default function RiwayatResetPasswordMobilePage() {
       </div>
 
       {approval ? (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4">
-          <div className="w-full max-w-sm rounded-3xl border border-emerald-400/30 bg-slate-900 p-5 shadow-2xl">
-            <h2 className="text-sm font-black text-white">Kode pemulihan</h2>
-            <p className="mt-2 text-xs leading-5 text-slate-400">
+        <Modal
+          isOpen
+          onClose={() => setApproval(null)}
+          title="Kode pemulihan"
+          titleId="reset-approval-title"
+          maxWidth="max-w-sm"
+          hideFooter
+        >
+          <div>
+            <p className="text-xs leading-5 text-slate-400">
               Serahkan kode ini kepada{" "}
               <strong className="text-white">{approval.namaOperator}</strong>{" "}
               secara langsung. Berlaku {approval.berlakuMenit} menit dan hanya
@@ -407,30 +489,19 @@ export default function RiwayatResetPasswordMobilePage() {
               Saya sudah menyerahkan kodenya
             </button>
           </div>
-        </div>
+        </Modal>
       ) : null}
 
       {photo ? (
-        <div className="fixed inset-0 z-[80] flex items-end justify-center bg-slate-950/90 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-md space-y-3 rounded-3xl border border-white/15 bg-slate-900 p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-black text-white">
-                  {photo.entry.operatorName}
-                </p>
-                <p className="truncate text-[11px] text-slate-400">
-                  {formatTimestamp(photo.entry.requestedAt)}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setPhoto(null)}
-                aria-label="Tutup foto"
-                className="grid size-9 shrink-0 place-items-center rounded-xl bg-white/5 text-slate-300 active:scale-95"
-              >
-                ✕
-              </button>
-            </div>
+        <Modal
+          isOpen
+          onClose={() => setPhoto(null)}
+          title={photo.entry.operatorName}
+          titleId="reset-photo-title"
+          subtitle={formatTimestamp(photo.entry.requestedAt)}
+          maxWidth="max-w-md"
+        >
+          <div className="space-y-3">
             {/* Foto tersimpan base64 di database cloud dan ditampilkan lewat
                 data URI — tidak ada permintaan jaringan keluar, sesuai batasan
                 CSP aplikasi Tauri. */}
@@ -446,13 +517,21 @@ export default function RiwayatResetPasswordMobilePage() {
               identitas yang diketik.
             </p>
           </div>
-        </div>
+        </Modal>
       ) : null}
 
       {confirmDelete ? (
-        <div className="fixed inset-0 z-[80] flex items-end justify-center bg-slate-950/90 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-md space-y-3 rounded-3xl border border-white/15 bg-slate-900 p-4">
-            <p className="text-sm font-black text-white">Hapus riwayat ini?</p>
+        <Modal
+          isOpen
+          onClose={() => {
+            if (!busy) setConfirmDelete(null);
+          }}
+          title="Hapus riwayat ini?"
+          titleId="reset-delete-title"
+          maxWidth="max-w-md"
+          hideFooter
+        >
+          <div className="space-y-3">
             <p className="text-[11px] leading-4 text-slate-400">
               Riwayat pengajuan {confirmDelete.operatorName} beserta foto
               verifikasinya dihapus permanen.
@@ -478,7 +557,50 @@ export default function RiwayatResetPasswordMobilePage() {
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
+      ) : null}
+
+      {purgeOpen ? (
+        <Modal
+          isOpen
+          onClose={() => {
+            if (!busy) setPurgeOpen(false);
+          }}
+          title="Bersihkan riwayat lama?"
+          titleId="reset-purge-title"
+          maxWidth="max-w-md"
+          hideFooter
+        >
+          <div className="space-y-3">
+            <p className="text-xs leading-5 text-slate-300">
+              Semua riwayat berstatus Terpakai, Kedaluwarsa, atau Dibatalkan
+              yang lebih tua dari {PURGE_DAYS} hari dihapus permanen beserta
+              foto verifikasi wajahnya.
+            </p>
+            <p className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-2.5 text-[11px] leading-4 text-emerald-200">
+              Yang TETAP ada: pengajuan yang masih berjalan (Menunggu Verifikasi
+              dan Terkirim) serta akun operatornya.
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setPurgeOpen(false)}
+                disabled={busy}
+                className="min-h-11 flex-1 rounded-xl border border-white/15 px-3 text-xs font-bold text-slate-300 active:scale-95 disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void runPurge()}
+                className="min-h-11 flex-1 rounded-xl bg-rose-500 px-3 text-xs font-black text-white active:scale-95 disabled:opacity-50"
+              >
+                {busy ? "Membersihkan..." : "Bersihkan sekarang"}
+              </button>
+            </div>
+          </div>
+        </Modal>
       ) : null}
     </MobileAppShell>
   );

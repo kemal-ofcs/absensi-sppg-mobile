@@ -1,8 +1,9 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
+import { Icon } from "@/components/ui/Icon";
 import type { AttendancePhotoEntry } from "@/lib/attendance/photo-history";
 import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
@@ -11,7 +12,17 @@ import {
   deleteAttendancePhotoEntry,
   getAttendancePhotoImage,
   getAttendancePhotos,
+  purgeAttendancePhotoEntries,
 } from "@/lib/gateways/attendance-photo";
+
+/** Batas umur foto yang dibersihkan — sama dengan halaman Web/Desktop. */
+const PURGE_DAYS = 90;
+
+const MESSAGE_STYLE = {
+  success: "border-emerald-400/25 bg-emerald-400/10 text-emerald-200",
+  warning: "border-amber-400/25 bg-amber-400/10 text-amber-200",
+  error: "border-rose-400/25 bg-rose-400/10 text-rose-200",
+} as const;
 
 /** Rentang cepat yang tersedia di layar sempit. */
 const RANGES = [
@@ -44,6 +55,12 @@ function formatTimestamp(value: string) {
  * benar-benar dibuka — penting di jaringan seluler.
  */
 export default function FotoAbsensiMobilePage() {
+  // Penjaga anti klik ganda (Aturan 5). `useState` tidak cukup: pembaruannya
+  // dijadwalkan, sehingga dua klik dalam satu tick React sama-sama membaca
+  // nilai lama dan keduanya lolos. Dideklarasikan di ATAS, sebelum setiap
+  // early return, supaya urutan hook tidak pernah berubah antar-render.
+  const isSubmittingRef = useRef(false);
+
   const router = useRouter();
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
 
@@ -55,7 +72,7 @@ export default function FotoAbsensiMobilePage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{
-    tone: "success" | "error";
+    tone: keyof typeof MESSAGE_STYLE;
     text: string;
   } | null>(null);
   const [preview, setPreview] = useState<{
@@ -64,10 +81,19 @@ export default function FotoAbsensiMobilePage() {
   } | null>(null);
   const [confirmDelete, setConfirmDelete] =
     useState<AttendancePhotoEntry | null>(null);
+  const [purgeOpen, setPurgeOpen] = useState(false);
 
   useEffect(() => {
-    if (!authLoading && !isAuthenticated) router.replace("/login");
-  }, [authLoading, isAuthenticated, router]);
+    if (!authLoading && !isAuthenticated) {
+      router.replace("/login");
+      return;
+    }
+    // Ditolak izin area: dipulangkan, sama seperti Project Meksa. Mobile
+    // memakai static export dan tidak punya rute `/forbidden`.
+    if (!authLoading && isAuthenticated && !canView) {
+      router.replace("/dashboard");
+    }
+  }, [authLoading, isAuthenticated, canView, router]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -117,8 +143,10 @@ export default function FotoAbsensiMobilePage() {
   };
 
   const runDelete = async () => {
+    if (isSubmittingRef.current) return;
     if (!confirmDelete) return;
     setBusy(true);
+    isSubmittingRef.current = true;
     try {
       await deleteAttendancePhotoEntry(confirmDelete.idFoto);
       setMessage({
@@ -134,6 +162,37 @@ export default function FotoAbsensiMobilePage() {
           error instanceof Error ? error.message : "Foto tidak dapat dihapus.",
       });
     } finally {
+      isSubmittingRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  /** Hapus massal foto lama. Baris absensi & log scan tidak tersentuh. */
+  const runPurge = async () => {
+    if (isSubmittingRef.current) return;
+    setBusy(true);
+    isSubmittingRef.current = true;
+    try {
+      const result = await purgeAttendancePhotoEntries(PURGE_DAYS);
+      triggerHaptic(result.deleted > 0 ? "success" : "light");
+      setPurgeOpen(false);
+      setMessage({
+        tone: result.deleted > 0 ? "success" : "warning",
+        text:
+          result.deleted > 0
+            ? `${result.deleted} foto lama dibersihkan. Rekap kehadirannya tetap utuh.`
+            : `Tidak ada foto yang lebih tua dari ${PURGE_DAYS} hari.`,
+      });
+      await load();
+    } catch (error) {
+      triggerHaptic("error");
+      setMessage({
+        tone: "error",
+        text:
+          error instanceof Error ? error.message : "Pembersihan foto gagal.",
+      });
+    } finally {
+      isSubmittingRef.current = false;
       setBusy(false);
     }
   };
@@ -187,11 +246,7 @@ export default function FotoAbsensiMobilePage() {
               <button
                 type="button"
                 onClick={() => setMessage(null)}
-                className={`rounded-2xl border p-3 text-left text-[11px] leading-4 ${
-                  message.tone === "success"
-                    ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-200"
-                    : "border-rose-400/25 bg-rose-400/10 text-rose-200"
-                }`}
+                className={`rounded-2xl border p-3 text-left text-[11px] leading-4 ${MESSAGE_STYLE[message.tone]}`}
               >
                 {message.text}
               </button>
@@ -216,6 +271,21 @@ export default function FotoAbsensiMobilePage() {
                 </button>
               ))}
             </div>
+
+            {canDelete ? (
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic("warning");
+                  setPurgeOpen(true);
+                }}
+                disabled={busy}
+                className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-rose-400/30 bg-rose-400/10 text-xs font-black text-rose-200 transition active:scale-95 disabled:opacity-50"
+              >
+                <Icon name="trash" className="size-4" />
+                Bersihkan foto &gt; {PURGE_DAYS} hari
+              </button>
+            ) : null}
 
             {loading ? (
               <div className="grid min-h-40 place-items-center rounded-3xl border border-white/10 bg-slate-900/70 text-xs text-slate-400">
@@ -392,6 +462,49 @@ export default function FotoAbsensiMobilePage() {
                 className="min-h-11 flex-1 rounded-xl border border-white/15 text-xs font-bold text-slate-300"
               >
                 Batal
+              </button>
+            </div>
+          </div>
+        </dialog>
+      ) : null}
+
+      {purgeOpen ? (
+        <dialog
+          open
+          aria-label="Konfirmasi bersihkan foto lama"
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !busy) setPurgeOpen(false);
+          }}
+          className="fixed inset-0 z-50 m-0 flex size-full max-h-none max-w-none items-center justify-center bg-slate-950/90 p-4 backdrop-blur"
+        >
+          <div className="w-full max-w-sm rounded-3xl border border-rose-400/25 bg-slate-900 p-4">
+            <h2 className="text-sm font-black text-white">
+              Bersihkan foto lama
+            </h2>
+            <p className="mt-2 text-xs leading-5 text-slate-300">
+              Seluruh foto bukti yang tanggal kerjanya lebih dari {PURGE_DAYS}{" "}
+              hari lalu dihapus permanen dari database cloud dan perangkat ini.
+            </p>
+            <p className="mt-2 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-2.5 text-[11px] leading-4 text-emerald-200">
+              Yang TETAP ada: rekap kehadiran, riwayat, log scan, dan laporan.
+              Yang hilang hanya bukti visualnya.
+            </p>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setPurgeOpen(false)}
+                disabled={busy}
+                className="min-h-11 flex-1 rounded-xl border border-white/15 text-xs font-bold text-slate-300 disabled:opacity-60"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => void runPurge()}
+                disabled={busy}
+                className="min-h-11 flex-1 rounded-xl bg-rose-500 text-xs font-black text-slate-950 disabled:opacity-60"
+              >
+                {busy ? "Membersihkan..." : `Bersihkan > ${PURGE_DAYS} hari`}
               </button>
             </div>
           </div>

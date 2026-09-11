@@ -2,11 +2,13 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DatabaseBackupCard } from "@/components/DatabaseBackupCard";
 import { MailSettingsCard } from "@/components/MailSettingsCard";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { PasswordRecoveryCard } from "@/components/PasswordRecoveryCard";
+import { CompanyProfileCard } from "@/components/settings/CompanyProfileCard";
+import { ScannerSafetyCard } from "@/components/settings/ScannerSafetyCard";
 import { ThemeSettingsCard } from "@/components/ThemeSettingsCard";
 import { TwoFactorCard } from "@/components/TwoFactorCard";
 import { Icon } from "@/components/ui/Icon";
@@ -51,11 +53,16 @@ import { validateGeofenceSettings } from "@/lib/validations/geofence";
 import { validateIpAllowlistEntries } from "@/lib/validations/ip-allowlist";
 
 export default function SettingsPage() {
+  // Penjaga anti klik ganda (Aturan 5), sama seperti Project Meksa. `useState`
+  // tidak cukup: dua ketukan dalam satu tick React sama-sama membaca nilai lama.
+  const isSubmittingRef = useRef(false);
   const { user, isAuthenticated, isLoading: authLoading, logout } = useAuth();
   const router = useRouter();
   const isOnline = useOnlineStatus();
   const canOperational = canAccessArea(user, "operational");
   const canShift = canAccessArea(user, "shift");
+  const canHolidays = canAccessArea(user, "holidays");
+  const canIdCards = canAccessArea(user, "idcards");
   const canPayroll = canAccessArea(user, "payroll");
   const canAudit = canAccessArea(user, "audit");
   const canManageGeofence = Boolean(
@@ -71,6 +78,13 @@ export default function SettingsPage() {
   // Mengambil foto bukti tidak butuh izin — kewajibannya ditentukan sakelar
   // role. Yang di-RBAC adalah MELIHAT dan MENGHAPUS fotonya.
   const canViewAttendancePhoto = canAccessArea(user, "attendance_photo");
+  // Sama seperti halaman Master Operator Web/Desktop: hanya Superadmin.
+  const canManageOperators = Boolean(user?.isSuperadmin);
+  // Izin yang dituntut backend untuk profil instansi & nama aplikasi.
+  const canManageCompanyProfile = hasPermission(user, "settings.manage");
+  // Seluruh command sinkronisasi menuntut `sync.view`; tanpa izin itu halaman
+  // /sync hanya berisi status kosong.
+  const canViewSync = hasPermission(user, "sync.view");
   const canTriggerAlfa = hasPermission(user, "alfa.trigger");
   const canSeeAutoAlfa = canManageAutoAlfa || canTriggerAlfa;
 
@@ -140,7 +154,9 @@ export default function SettingsPage() {
         const settings = await getGeofenceSettings();
         if (!cancelled) setGeofence(settings);
       } catch {
-        // Handled
+        // Pengaturan geofence gagal dimuat: formulirnya tetap tampil dengan
+        // nilai bawaan, dan penyimpanan berikutnya menulis ulang nilainya.
+        // Tidak ada data yang hilang, jadi tidak ada yang perlu dilaporkan.
       } finally {
         if (!cancelled) setGeofenceLoading(false);
       }
@@ -238,6 +254,7 @@ export default function SettingsPage() {
   };
 
   const handleSaveGeofence = async () => {
+    if (isSubmittingRef.current) return;
     const errors = validateGeofenceSettings(geofence);
     const firstError = Object.values(errors)[0];
     if (firstError) {
@@ -248,6 +265,7 @@ export default function SettingsPage() {
     }
     setGeofenceBusy(true);
     triggerHaptic("light");
+    isSubmittingRef.current = true;
     try {
       const saved = await saveGeofenceSettings(geofence);
       setGeofence(saved);
@@ -263,11 +281,13 @@ export default function SettingsPage() {
       );
       setTimeout(() => setSaveMessage(""), 3000);
     } finally {
+      isSubmittingRef.current = false;
       setGeofenceBusy(false);
     }
   };
 
   const handleSaveScanSecurity = async () => {
+    if (isSubmittingRef.current) return;
     const entries = ipAllowlistDraft
       .split(/[\n,;]/)
       .map((item) => item.trim())
@@ -280,6 +300,7 @@ export default function SettingsPage() {
       return;
     }
     setIpAllowlistBusy(true);
+    isSubmittingRef.current = true;
     try {
       const saved = await saveScanSecurity({
         photoEnabled: scanPhotoEnabled,
@@ -307,14 +328,21 @@ export default function SettingsPage() {
       );
       triggerHaptic("error");
     } finally {
+      isSubmittingRef.current = false;
       setIpAllowlistBusy(false);
     }
   };
 
   const handleToggleGeofence = async () => {
+    if (isSubmittingRef.current) return;
     triggerHaptic("light");
+    // Nilai sebelumnya disimpan supaya sakelarnya bisa DIKEMBALIKAN saat
+    // penyimpanan gagal (sama seperti Project Meksa). Tanpa itu layar tetap
+    // menampilkan geofencing menyala sementara penyimpanannya menolak.
+    const sebelumnya = geofence;
     const updated = { ...geofence, enabled: !geofence.enabled };
     setGeofence(updated);
+    isSubmittingRef.current = true;
     try {
       await saveGeofenceSettings(updated);
       triggerHaptic("success");
@@ -324,14 +352,25 @@ export default function SettingsPage() {
           : "Geofencing GPS dinonaktifkan.",
       );
       setTimeout(() => setSaveMessage(""), 3000);
-    } catch {
+    } catch (error) {
+      setGeofence(sebelumnya);
       triggerHaptic("error");
+      setSaveMessage(
+        error instanceof Error
+          ? `Gagal menyimpan geofencing: ${error.message}`
+          : "Gagal menyimpan pengaturan geofencing.",
+      );
+      setTimeout(() => setSaveMessage(""), 4000);
+    } finally {
+      isSubmittingRef.current = false;
     }
   };
 
   const handleAutoAlfaToggle = async (enabled: boolean) => {
+    if (isSubmittingRef.current) return;
     setAutoAlfaBusy(true);
     triggerHaptic("light");
+    isSubmittingRef.current = true;
     try {
       await saveAutoAlfaSetting(enabled);
       setAutoAlfaEnabled(enabled);
@@ -349,6 +388,7 @@ export default function SettingsPage() {
       );
       setTimeout(() => setSaveMessage(""), 4000);
     } finally {
+      isSubmittingRef.current = false;
       setAutoAlfaBusy(false);
     }
   };
@@ -386,6 +426,7 @@ export default function SettingsPage() {
   const tursoProviderInfo = describeProvider(tursoProvider);
 
   const handleTursoSave = async () => {
+    if (isSubmittingRef.current) return;
     // Tahan input yang jelas salah di sini supaya alasannya tampil di dekat
     // field, bukan sebagai kegagalan IPC generik setelah penyimpanan.
     const needsEndpoint = providerNeedsEndpoint(tursoProvider);
@@ -408,6 +449,7 @@ export default function SettingsPage() {
     }
     setTursoBusy(true);
     triggerHaptic("light");
+    isSubmittingRef.current = true;
     try {
       await saveTursoConfig(
         needsEndpoint ? tursoUrl.trim() : "",
@@ -441,6 +483,7 @@ export default function SettingsPage() {
       );
       setTimeout(() => setSaveMessage(""), 4000);
     } finally {
+      isSubmittingRef.current = false;
       setTursoBusy(false);
     }
   };
@@ -612,6 +655,60 @@ export default function SettingsPage() {
           </div>
         ) : null}
 
+        {/* Hari Libur & Whitelist Scan (butuh izin holidays.view) */}
+        {canHolidays ? (
+          <div className="rounded-3xl border border-teal-500/20 bg-gradient-to-br from-teal-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-xl bg-teal-500/20 text-teal-300">
+                  <Icon name="calendar" className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Hari Libur &amp; Whitelist
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Kalender libur &amp; Shift/Divisi yang tetap boleh scan
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/holidays"
+                onClick={() => triggerHaptic("light")}
+                className="whitespace-nowrap rounded-xl bg-teal-500 px-3.5 py-1.5 text-xs font-black text-slate-950 shadow-md transition hover:bg-teal-400 active:scale-95"
+              >
+                Kelola &rarr;
+              </Link>
+            </div>
+          </div>
+        ) : null}
+
+        {/* ID Card: daftar & status cetak (area idcards) */}
+        {canIdCards ? (
+          <div className="rounded-3xl border border-sky-500/20 bg-gradient-to-br from-sky-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-xl bg-sky-500/20 text-sky-300">
+                  <Icon name="id-card" className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">ID Card</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Status cetak kartu, pratinjau &amp; simpan gambar
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/id-cards"
+                onClick={() => triggerHaptic("light")}
+                className="whitespace-nowrap rounded-xl bg-sky-500 px-3.5 py-1.5 text-xs font-black text-slate-950 shadow-md transition hover:bg-sky-400 active:scale-95"
+              >
+                Buka &rarr;
+              </Link>
+            </div>
+          </div>
+        ) : null}
+
         {/* Slip & Estimasi Gaji Section (Hanya jika memiliki izin payroll) */}
         {canPayroll ? (
           <div className="rounded-3xl border border-emerald-500/20 bg-gradient-to-br from-emerald-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
@@ -728,6 +825,40 @@ export default function SettingsPage() {
             </div>
           </div>
         ) : null}
+
+        {/* Master Operator: akun, role & permission (khusus Superadmin) */}
+        {canManageOperators ? (
+          <div className="rounded-3xl border border-amber-500/20 bg-gradient-to-br from-amber-950/25 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-xl bg-amber-500/20 text-amber-300">
+                  <Icon name="users" className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Master Operator
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Akun operator, role dinamis &amp; permission
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/operators"
+                onClick={() => triggerHaptic("light")}
+                className="whitespace-nowrap rounded-xl bg-amber-400 px-3.5 py-1.5 text-xs font-black text-slate-950 shadow-md transition hover:bg-amber-300 active:scale-95"
+              >
+                Kelola &rarr;
+              </Link>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Profil instansi, nama aplikasi, logo & TTD ID Card */}
+        {canManageCompanyProfile ? <CompanyProfileCard /> : null}
+
+        {/* Keamanan pemindai (backend menolak selain Superadmin) */}
+        {user?.isSuperadmin ? <ScannerSafetyCard /> : null}
 
         {/* Email Sistem: satu-satunya jalur pengiriman link Lupa Password. */}
         {canManageAutoAlfa ? <MailSettingsCard /> : null}
@@ -1065,31 +1196,33 @@ export default function SettingsPage() {
           <DatabaseBackupCard provider={tursoProvider} />
         ) : null}
 
-        {/* Pusat Sinkronisasi Shortcut */}
-        <div className="rounded-3xl border border-sky-500/20 bg-gradient-to-br from-sky-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
-          <div className="flex items-center justify-between gap-3 mb-2">
-            <div className="flex items-center gap-2.5">
-              <div className="grid size-9 place-items-center rounded-xl bg-sky-500/20 text-sky-300">
-                <Icon name="sync" className="size-5" />
+        {/* Pusat Sinkronisasi Shortcut (izin sync.view) */}
+        {canViewSync ? (
+          <div className="rounded-3xl border border-sky-500/20 bg-gradient-to-br from-sky-950/30 via-slate-900/80 to-slate-900/90 p-4 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-xl bg-sky-500/20 text-sky-300">
+                  <Icon name="sync" className="size-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Pusat Sinkronisasi Data
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Antrean outbox offline, riwayat push & snapshot
+                  </p>
+                </div>
               </div>
-              <div>
-                <h3 className="text-sm font-bold text-white">
-                  Pusat Sinkronisasi Data
-                </h3>
-                <p className="text-[11px] text-slate-400">
-                  Antrean outbox offline, riwayat push & snapshot
-                </p>
-              </div>
+              <Link
+                href="/sync"
+                onClick={() => triggerHaptic("light")}
+                className="rounded-xl bg-sky-400 px-3.5 py-1.5 text-xs font-black text-slate-950 shadow-md hover:bg-sky-300 active:scale-95 transition"
+              >
+                Buka →
+              </Link>
             </div>
-            <Link
-              href="/sync"
-              onClick={() => triggerHaptic("light")}
-              className="rounded-xl bg-sky-400 px-3.5 py-1.5 text-xs font-black text-slate-950 shadow-md hover:bg-sky-300 active:scale-95 transition"
-            >
-              Buka →
-            </Link>
           </div>
-        </div>
+        ) : null}
 
         {/* Keamanan absensi: sakelar induk fitur + daftar IP */}
         {canManageGeofence ? (
@@ -1150,6 +1283,7 @@ export default function SettingsPage() {
                   </span>
                 </div>
                 <textarea
+                  aria-label="Daftar alamat IP yang diizinkan"
                   value={ipAllowlistDraft}
                   onChange={(event) => setIpAllowlistDraft(event.target.value)}
                   rows={4}
@@ -1288,6 +1422,7 @@ export default function SettingsPage() {
                 </div>
                 <input
                   type="number"
+                  aria-label="Radius kantor dalam meter"
                   min={10}
                   max={10000}
                   value={geofence.radiusMeter}

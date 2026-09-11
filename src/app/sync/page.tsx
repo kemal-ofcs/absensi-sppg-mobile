@@ -1,14 +1,16 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
+import { hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
 import type { SyncConflict, SyncStatus } from "@/lib/gateways/sync-status";
 import {
   clearFailedSync,
+  forceResyncSettings,
   getSyncConflicts,
   getSyncStatus,
   resolveSyncConflicts,
@@ -20,19 +22,30 @@ import {
 } from "@/lib/gateways/sync-status";
 
 export default function SyncPage() {
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+  // Seluruh command sinkronisasi di backend menuntut `sync.view`.
+  const canViewSync = hasPermission(user, "sync.view");
   const router = useRouter();
 
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [conflicts, setConflicts] = useState<SyncConflict[]>([]);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [message, setMessage] = useState<string>("");
+  const isResyncingRef = useRef(false);
+  const [isResyncing, setIsResyncing] = useState(false);
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
       router.replace("/login");
+      return;
     }
-  }, [authLoading, isAuthenticated, router]);
+    // Otorisasi, bukan sekadar autentikasi (sama seperti Project Meksa).
+    // Halaman ini menampilkan konflik sinkronisasi yang memuat payload lintas
+    // domain. Mobile tidak punya rute `/forbidden`.
+    if (!authLoading && isAuthenticated && !canViewSync) {
+      router.replace("/dashboard");
+    }
+  }, [authLoading, isAuthenticated, canViewSync, router]);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -40,16 +53,22 @@ export default function SyncPage() {
       setStatus(data);
       const conf = await getSyncConflicts();
       setConflicts(conf);
-    } catch {
-      // Ignored silently
+    } catch (err) {
+      // Diam berarti layar menampilkan status LAMA seolah masih berlaku —
+      // pada halaman yang justru dibuka untuk memastikan sinkronisasi sehat.
+      setMessage(
+        err instanceof Error
+          ? err.message
+          : "Status sinkronisasi gagal dibaca.",
+      );
     }
   }, []);
 
   useEffect(() => {
-    if (isAuthenticated) {
+    if (isAuthenticated && canViewSync) {
       void loadStatus();
     }
-  }, [isAuthenticated, loadStatus]);
+  }, [isAuthenticated, canViewSync, loadStatus]);
 
   // Ikuti hasil auto-sync latar. Sebelumnya kegagalan auto-sync ditelan diam-diam,
   // jadi halaman ini bisa memperlihatkan angka lama tanpa petunjuk apa pun bahwa
@@ -107,8 +126,47 @@ export default function SyncPage() {
     try {
       await retryFailedSync();
       await handleSyncNow();
-    } catch {
-      // Handled
+    } catch (err) {
+      // Diam berarti operator menekan "coba ulang" dan tidak terjadi apa pun
+      // yang terlihat — ia akan menekannya berkali-kali tanpa tahu penyebabnya.
+      setMessage(
+        err instanceof Error
+          ? err.message
+          : "Percobaan ulang sinkronisasi gagal.",
+      );
+    }
+  };
+
+  /**
+   * Antrekan ulang data master lokal — Shift, Template ID Card, Profil
+   * Instansi, Hari Libur, dan Pengaturan Sistem (kecuali kunci khusus
+   * perangkat) — lalu kirim ke server. Sama dengan tombol "Kirim ulang
+   * pengaturan lokal" di Pengaturan Web/Desktop (`force_enqueue_settings`).
+   */
+  const handleResyncSettings = async () => {
+    if (isResyncingRef.current) return;
+    isResyncingRef.current = true;
+    setIsResyncing(true);
+    setMessage("");
+    triggerHaptic("light");
+    try {
+      const result = await forceResyncSettings();
+      if (result) {
+        setStatus(result.status);
+        setConflicts(await getSyncConflicts());
+        triggerHaptic("success");
+        setMessage(`${result.enqueue.pesan} Sinkronisasi ke server berhasil.`);
+      }
+    } catch (err) {
+      triggerHaptic("error");
+      setMessage(
+        err instanceof Error
+          ? err.message
+          : "Gagal menyinkronkan ulang pengaturan ke server.",
+      );
+    } finally {
+      isResyncingRef.current = false;
+      setIsResyncing(false);
     }
   };
 
@@ -157,8 +215,14 @@ export default function SyncPage() {
     try {
       await clearFailedSync();
       await loadStatus();
-    } catch {
-      // Handled
+    } catch (err) {
+      // Tombol yang tidak memberi jawaban apa pun membuat orang mengira
+      // antreannya sudah bersih padahal belum.
+      setMessage(
+        err instanceof Error
+          ? err.message
+          : "Antrean gagal tidak dapat dibersihkan.",
+      );
     }
   };
 
@@ -232,6 +296,23 @@ export default function SyncPage() {
               {isSyncing ? "Menyinkronkan..." : "Sinkronkan Sekarang"}
             </span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => void handleResyncSettings()}
+            disabled={isSyncing || isResyncing}
+            className="mt-2 flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl border border-sky-400/40 bg-sky-400/10 text-xs font-bold text-sky-200 transition active:scale-[0.98] disabled:opacity-50"
+          >
+            <Icon name="upload" className="size-4" />
+            {isResyncing
+              ? "Mengirim ulang pengaturan..."
+              : "Kirim ulang pengaturan lokal"}
+          </button>
+          <p className="mt-1.5 text-center text-[10px] leading-4 text-slate-500">
+            Kirim ulang Shift, Profil Instansi, Template ID Card, Hari Libur
+            &amp; Pengaturan Sistem perangkat ini ke server bila server
+            tertinggal.
+          </p>
         </div>
 
         {/* Outbox Metrics Grid */}

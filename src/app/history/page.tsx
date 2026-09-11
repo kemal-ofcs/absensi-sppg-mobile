@@ -1,18 +1,73 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
+import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { canAccessArea } from "@/lib/auth/access";
+import { canAccessArea, hasPermission } from "@/lib/auth/access";
+import { exportToCsv, exportToExcel } from "@/lib/client/excel-export";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
-import { getRekapHarian, getRiwayatScan } from "@/lib/gateways/report";
+import {
+  editAbsensiHarian,
+  getRekapHarian,
+  getRiwayatScan,
+  hapusLogScan,
+} from "@/lib/gateways/report";
 import { useDebounce } from "@/lib/hooks/useDebounce";
+import { buildDailyExport, buildScanLogExport } from "./history-export";
 
 type HistoryTab = "daily" | "scan-logs";
+
+interface EditAbsensiDraft {
+  id_sesi: string;
+  nama: string;
+  id_karyawan: string;
+  tanggal: string;
+  jam_masuk: string;
+  jam_pulang: string;
+  status_kehadiran: string;
+  status_absen: string;
+  keterangan: string;
+}
+
+interface DeleteScanTarget {
+  id_log: number;
+  nama: string;
+  id_karyawan: string;
+  jenis_scan: string;
+  jam_scan: string;
+}
+
+/**
+ * Backend membatasi log scan per permintaan (bawaan 200, maksimal 500). Satu
+ * hari di instansi besar bisa melebihi itu — 800 orang x 2 scan — jadi halaman
+ * diambil sampai habis. Tanpa ini daftar DAN ekspor terpotong diam-diam.
+ */
+const SCAN_PAGE_SIZE = 500;
+/** Pagar pengaman: bug di sisi lain tidak boleh jadi perulangan tanpa akhir. */
+const MAX_SCAN_PAGES = 40;
+
+async function fetchAllScanLogs(tanggal: string) {
+  const all: Record<string, unknown>[] = [];
+  for (let page = 0; page < MAX_SCAN_PAGES; page++) {
+    const batch =
+      (await getRiwayatScan({
+        tanggal,
+        limit: SCAN_PAGE_SIZE,
+        offset: page * SCAN_PAGE_SIZE,
+      })) ?? [];
+    all.push(...batch);
+    if (batch.length < SCAN_PAGE_SIZE) break;
+  }
+  return all;
+}
+
+const EDIT_INPUT_CLASS =
+  "min-h-11 w-full rounded-xl border border-white/15 bg-slate-950 px-3 text-xs text-white outline-none focus:border-sky-400";
 
 function formatTimeOnly(timeStr: unknown): string {
   if (!timeStr || typeof timeStr !== "string") return "--:--";
@@ -39,10 +94,32 @@ function formatMinutesToHours(min: unknown): string {
   return `${num} mnt (${hours} jam)`;
 }
 
+/** Nilai untuk input jam bertipe time (HH:mm), atau kosong bila belum ada. */
+function toTimeInput(value: unknown): string {
+  const time = formatTimeOnly(value);
+  return time === "--:--" ? "" : time.slice(0, 5);
+}
+
+/**
+ * Bentuk jam yang dikirim ke backend, identik dengan halaman Riwayat
+ * Web/Desktop: `YYYY-MM-DD HH:mm:00` pada tanggal kerja. Backend sendiri yang
+ * memindahkan jam pulang shift malam ke hari berikutnya.
+ */
+function toPatchTime(time: string, date: string): string {
+  const clean = time.trim();
+  if (!clean) return "";
+  if (clean.includes(" ") || clean.includes("T")) return clean;
+  return `${date} ${clean.slice(0, 5)}:00`;
+}
+
 export default function HistoryPage() {
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
   const router = useRouter();
   const canViewHistory = canAccessArea(user, "history");
+  // Keduanya masuk SENSITIVE_MUTATION_PERMISSIONS: absensi historis adalah
+  // sumber perhitungan payroll. Backend Rust tetap memeriksa ulang izinnya.
+  const canEditHistory = hasPermission(user, "history.edit");
+  const canDeleteHistory = hasPermission(user, "history.delete");
 
   const [activeTab, setActiveTab] = useState<HistoryTab>("daily");
   const [date, setDate] = useState<string>(
@@ -66,13 +143,32 @@ export default function HistoryPage() {
     unknown
   > | null>(null);
 
+  // CRUD State
+  const [editData, setEditData] = useState<EditAbsensiDraft | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteScanTarget | null>(
+    null,
+  );
+  const [actionBusy, setActionBusy] = useState(false);
+  const isSubmittingRef = useRef(false);
+  const [exporting, setExporting] = useState(false);
+  const [feedback, setFeedback] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
+
   const debouncedSearch = useDebounce(search, 300);
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
       router.replace("/login");
+      return;
     }
-  }, [authLoading, isAuthenticated, router]);
+    // Ditolak izin area: dipulangkan, sama seperti Project Meksa. Mobile
+    // memakai static export dan tidak punya rute `/forbidden`.
+    if (!authLoading && isAuthenticated && !canViewHistory) {
+      router.replace("/dashboard");
+    }
+  }, [authLoading, isAuthenticated, canViewHistory, router]);
 
   const loadData = useCallback(async (targetDate: string, tab: HistoryTab) => {
     setIsLoading(true);
@@ -81,8 +177,7 @@ export default function HistoryPage() {
         const data = await getRekapHarian({ tanggal: targetDate });
         setDailyRecords(data || []);
       } else {
-        const data = await getRiwayatScan({ tanggal: targetDate });
-        setScanLogs(data || []);
+        setScanLogs(await fetchAllScanLogs(targetDate));
       }
     } catch {
       if (tab === "daily") setDailyRecords([]);
@@ -119,6 +214,103 @@ export default function HistoryPage() {
   const handleDateChange = (newDate: string) => {
     triggerHaptic("light");
     setDate(newDate);
+  };
+
+  const openEditDaily = (rec: Record<string, unknown>) => {
+    triggerHaptic("light");
+    setSelectedDaily(null);
+    setEditData({
+      id_sesi: String(rec.id_sesi || ""),
+      nama: String(rec.nama || ""),
+      id_karyawan: String(rec.id_karyawan || ""),
+      tanggal: String(rec.tanggal || date),
+      jam_masuk: toTimeInput(rec.jam_masuk),
+      jam_pulang: toTimeInput(rec.jam_pulang),
+      status_kehadiran: String(rec.status_kehadiran || "Hadir"),
+      status_absen: String(rec.status_absen || "Lengkap"),
+      keterangan: String(rec.keterangan || ""),
+    });
+  };
+
+  const openDeleteScanLog = (log: Record<string, unknown>) => {
+    triggerHaptic("warning");
+    setSelectedScanLog(null);
+    setDeleteTarget({
+      id_log: Number(log.id_log),
+      nama: String(log.nama || "-"),
+      id_karyawan: String(log.id_karyawan || "-"),
+      jenis_scan: String(log.jenis_scan || "-"),
+      jam_scan: formatTimeOnly(log.jam_scan),
+    });
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editData || isSubmittingRef.current) return;
+    if (!editData.id_sesi) {
+      setFeedback({
+        type: "error",
+        message: "ID sesi absensi tidak ditemukan, data tidak dapat diedit.",
+      });
+      return;
+    }
+    isSubmittingRef.current = true;
+    setActionBusy(true);
+    setFeedback(null);
+    try {
+      const result = await editAbsensiHarian(editData.id_sesi, {
+        jam_masuk: toPatchTime(editData.jam_masuk, editData.tanggal),
+        jam_pulang: toPatchTime(editData.jam_pulang, editData.tanggal),
+        status_kehadiran: editData.status_kehadiran || undefined,
+        status_absen: editData.status_absen || undefined,
+        keterangan: editData.keterangan || undefined,
+      });
+      if (result.sukses) {
+        triggerHaptic("success");
+        setFeedback({ type: "success", message: result.pesan });
+        setEditData(null);
+        void loadData(date, activeTab);
+      } else {
+        triggerHaptic("error");
+        setFeedback({ type: "error", message: result.pesan });
+      }
+    } catch (err: unknown) {
+      triggerHaptic("error");
+      setFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : "Gagal mengedit absensi.",
+      });
+    } finally {
+      setActionBusy(false);
+      isSubmittingRef.current = false;
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setActionBusy(true);
+    setFeedback(null);
+    try {
+      const result = await hapusLogScan(deleteTarget.id_log);
+      if (result.sukses) {
+        triggerHaptic("success");
+        setFeedback({ type: "success", message: result.pesan });
+        setDeleteTarget(null);
+        void loadData(date, activeTab);
+      } else {
+        triggerHaptic("error");
+        setFeedback({ type: "error", message: result.pesan });
+      }
+    } catch (err: unknown) {
+      triggerHaptic("error");
+      setFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : "Gagal menghapus data.",
+      });
+    } finally {
+      setActionBusy(false);
+      isSubmittingRef.current = false;
+    }
   };
 
   // Filtered Daily Records
@@ -172,6 +364,50 @@ export default function HistoryPage() {
       return matchSearch && matchStatus;
     });
   }, [scanLogs, debouncedSearch, statusFilter]);
+
+  /**
+   * Ekspor baris tab aktif sesuai filter yang sedang tampil. Di Android berkas
+   * diserahkan ke dialog "Simpan ke…" (`mobile_save_file_to_device`).
+   */
+  const handleExport = async (format: "csv" | "excel") => {
+    const rows = activeTab === "daily" ? filteredDaily : filteredScanLogs;
+    if (exporting || rows.length === 0) return;
+    setExporting(true);
+    triggerHaptic("light");
+    try {
+      const data =
+        activeTab === "daily"
+          ? buildDailyExport(rows, date)
+          : buildScanLogExport(rows, date);
+      const res =
+        format === "csv"
+          ? await exportToCsv(data.filename, data.headers, data.rows)
+          : await exportToExcel(
+              data.filename,
+              data.sheetName,
+              data.headers,
+              data.rows,
+            );
+      // Menutup dialog "Simpan ke…" adalah pembatalan, bukan kegagalan.
+      if (res.cancelled) return;
+      triggerHaptic("success");
+      setFeedback({
+        type: "success",
+        message: `${rows.length} baris diekspor ke ${format === "csv" ? "CSV" : "Excel"}${res.path ? ` (${res.path})` : ""}.`,
+      });
+    } catch (err) {
+      triggerHaptic("error");
+      setFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : "Ekspor gagal.",
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const exportRowCount =
+    activeTab === "daily" ? filteredDaily.length : filteredScanLogs.length;
 
   if (!authLoading && isAuthenticated && !canViewHistory) {
     return (
@@ -255,6 +491,7 @@ export default function HistoryPage() {
           <div className="flex flex-col gap-2">
             <input
               type="date"
+              aria-label="Tanggal riwayat"
               value={date}
               onChange={(e) => handleDateChange(e.target.value)}
               className="w-full rounded-2xl border border-white/15 bg-slate-950 px-4 py-2.5 text-xs font-semibold text-white focus:border-sky-400 focus:outline-none font-mono"
@@ -265,6 +502,7 @@ export default function HistoryPage() {
           <div className="mt-3 relative">
             <input
               type="text"
+              aria-label="Cari riwayat absensi"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Cari nama, ID, divisi, catatan..."
@@ -303,7 +541,37 @@ export default function HistoryPage() {
               </button>
             ))}
           </div>
+
+          {/* Ekspor tab aktif */}
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => void handleExport("csv")}
+              disabled={isLoading || exporting || exportRowCount === 0}
+              className="flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/5 text-[11px] font-bold text-sky-300 transition active:scale-95 disabled:opacity-40"
+            >
+              <Icon name="download" className="size-4" />
+              Ekspor CSV
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleExport("excel")}
+              disabled={isLoading || exporting || exportRowCount === 0}
+              className="flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-[11px] font-bold text-emerald-300 transition active:scale-95 disabled:opacity-40"
+            >
+              <Icon name="document" className="size-4" />
+              {exporting ? "Menyiapkan..." : "Ekspor Excel"}
+            </button>
+          </div>
         </div>
+
+        {feedback ? (
+          <FeedbackBanner
+            type={feedback.type}
+            message={feedback.message}
+            onClose={() => setFeedback(null)}
+          />
+        ) : null}
 
         {/* Record List */}
         <div className="flex flex-col gap-2">
@@ -314,7 +582,10 @@ export default function HistoryPage() {
                 : `Daftar Log Scan (${filteredScanLogs.length})`}
             </span>
             <span className="text-[11px] text-slate-500">
-              Klik card untuk detail
+              {(activeTab === "daily" && canEditHistory) ||
+              (activeTab === "scan-logs" && canDeleteHistory)
+                ? "Klik card untuk detail & aksi"
+                : "Klik card untuk detail"}
             </span>
           </div>
 
@@ -665,6 +936,17 @@ export default function HistoryPage() {
                 ) : null}
               </div>
             </div>
+
+            {canEditHistory ? (
+              <button
+                type="button"
+                onClick={() => openEditDaily(selectedDaily)}
+                className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/15 text-xs font-black text-amber-200 transition hover:bg-amber-500/25 active:scale-95"
+              >
+                <span aria-hidden="true">✏️</span>
+                <span>Edit Data Absensi</span>
+              </button>
+            ) : null}
           </div>
         )}
       </Modal>
@@ -802,8 +1084,219 @@ export default function HistoryPage() {
                 </div>
               ) : null}
             </div>
+
+            {canDeleteHistory && Number(selectedScanLog.id_log) > 0 ? (
+              <button
+                type="button"
+                onClick={() => openDeleteScanLog(selectedScanLog)}
+                className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-rose-500/40 bg-rose-500/15 text-xs font-black text-rose-200 transition hover:bg-rose-500/25 active:scale-95"
+              >
+                <Icon name="trash" className="size-4" />
+                <span>Hapus Log Scan Ini</span>
+              </button>
+            ) : null}
           </div>
         )}
+      </Modal>
+
+      {/* Modal Edit Absensi Harian */}
+      <Modal
+        isOpen={Boolean(editData)}
+        onClose={() => {
+          if (!actionBusy) setEditData(null);
+        }}
+        title="Edit Data Absensi"
+        titleId="history-edit-modal-title"
+        subtitle={
+          editData
+            ? `${editData.nama} (${editData.id_karyawan}) · ${editData.tanggal}`
+            : undefined
+        }
+        maxWidth="max-w-md"
+        hideFooter
+      >
+        {editData ? (
+          <form
+            className="space-y-3.5 text-xs"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleSaveEdit();
+            }}
+          >
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label
+                  htmlFor="history-edit-jam-masuk"
+                  className="mb-1 block font-semibold text-slate-400"
+                >
+                  Jam Masuk
+                </label>
+                <input
+                  id="history-edit-jam-masuk"
+                  type="time"
+                  value={editData.jam_masuk}
+                  onChange={(e) =>
+                    setEditData({ ...editData, jam_masuk: e.target.value })
+                  }
+                  className={`${EDIT_INPUT_CLASS} font-mono`}
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="history-edit-jam-pulang"
+                  className="mb-1 block font-semibold text-slate-400"
+                >
+                  Jam Pulang
+                </label>
+                <input
+                  id="history-edit-jam-pulang"
+                  type="time"
+                  value={editData.jam_pulang}
+                  onChange={(e) =>
+                    setEditData({ ...editData, jam_pulang: e.target.value })
+                  }
+                  className={`${EDIT_INPUT_CLASS} font-mono`}
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="history-edit-status-kehadiran"
+                  className="mb-1 block font-semibold text-slate-400"
+                >
+                  Status Kehadiran
+                </label>
+                <select
+                  id="history-edit-status-kehadiran"
+                  value={editData.status_kehadiran}
+                  onChange={(e) =>
+                    setEditData({
+                      ...editData,
+                      status_kehadiran: e.target.value,
+                    })
+                  }
+                  className={EDIT_INPUT_CLASS}
+                >
+                  <option value="Hadir">Hadir</option>
+                  <option value="Sakit">Sakit</option>
+                  <option value="Izin">Izin</option>
+                  <option value="Dispen">Dispen</option>
+                  <option value="Alfa">Alfa</option>
+                </select>
+              </div>
+              <div>
+                <label
+                  htmlFor="history-edit-status-absen"
+                  className="mb-1 block font-semibold text-slate-400"
+                >
+                  Status Absen
+                </label>
+                <select
+                  id="history-edit-status-absen"
+                  value={editData.status_absen}
+                  onChange={(e) =>
+                    setEditData({ ...editData, status_absen: e.target.value })
+                  }
+                  className={EDIT_INPUT_CLASS}
+                >
+                  <option value="Lengkap">Lengkap</option>
+                  <option value="Belum Pulang">Belum Pulang</option>
+                  <option value="Tidak Hadir">Tidak Hadir</option>
+                  <option value="Perlu Verifikasi">Perlu Verifikasi</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="history-edit-keterangan"
+                className="mb-1 block font-semibold text-slate-400"
+              >
+                Keterangan
+              </label>
+              <input
+                id="history-edit-keterangan"
+                type="text"
+                placeholder="Keterangan koreksi / edit..."
+                value={editData.keterangan}
+                onChange={(e) =>
+                  setEditData({ ...editData, keterangan: e.target.value })
+                }
+                className={EDIT_INPUT_CLASS}
+              />
+            </div>
+
+            <p className="rounded-xl border border-amber-500/25 bg-amber-500/10 p-2.5 text-[11px] leading-4 text-amber-100">
+              Jam kerja, keterlambatan &amp; lembur dihitung ulang otomatis dari
+              jam baru sesuai aturan shift. Perubahan dicatat sebagai jejak
+              audit operator dan ikut disinkronkan.
+            </p>
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                disabled={actionBusy}
+                onClick={() => setEditData(null)}
+                className="min-h-11 flex-1 rounded-xl border border-white/10 bg-white/5 text-xs font-bold text-slate-300 transition hover:bg-white/10 active:scale-95 disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="submit"
+                disabled={actionBusy}
+                className="min-h-11 flex-1 rounded-xl bg-amber-400 text-xs font-black text-slate-950 shadow-lg transition hover:bg-amber-300 active:scale-95 disabled:opacity-50"
+              >
+                {actionBusy ? "Menyimpan..." : "Simpan Perubahan"}
+              </button>
+            </div>
+          </form>
+        ) : null}
+      </Modal>
+
+      {/* Modal Konfirmasi Hapus Log Scan */}
+      <Modal
+        isOpen={Boolean(deleteTarget)}
+        onClose={() => {
+          if (!actionBusy) setDeleteTarget(null);
+        }}
+        title="Hapus Log Scan"
+        titleId="history-delete-modal-title"
+        maxWidth="max-w-sm"
+        hideFooter
+      >
+        {deleteTarget ? (
+          <div className="flex flex-col gap-4 text-xs">
+            <div className="space-y-1 rounded-2xl border border-rose-500/20 bg-rose-950/30 p-3.5">
+              <p className="text-sm font-bold text-white">
+                Hapus log scan #{deleteTarget.id_log}?
+              </p>
+              <p className="text-slate-300">
+                {deleteTarget.nama} ({deleteTarget.id_karyawan}) — Scan{" "}
+                {deleteTarget.jenis_scan} pukul {deleteTarget.jam_scan}
+              </p>
+              <p className="pt-1 text-[11px] text-amber-300">
+                Tindakan ini permanen dan akan mencatat jejak audit operator.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={actionBusy}
+                onClick={() => setDeleteTarget(null)}
+                className="min-h-11 flex-1 rounded-xl border border-white/10 bg-white/5 text-xs font-bold text-slate-300 transition hover:bg-white/10 active:scale-95 disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={actionBusy}
+                onClick={() => void handleConfirmDelete()}
+                className="min-h-11 flex-1 rounded-xl bg-rose-500 text-xs font-black text-on-accent shadow-lg transition hover:bg-rose-600 active:scale-95 disabled:opacity-50"
+              >
+                {actionBusy ? "Menghapus..." : "Ya, Hapus"}
+              </button>
+            </div>
+          </div>
+        ) : null}
       </Modal>
     </MobileAppShell>
   );

@@ -6,7 +6,11 @@ import { useCallback, useEffect, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
-import { isShiftFleksibel } from "@/lib/attendance/time-policy";
+import {
+  hitungJamKerjaNormalMenit,
+  isShiftFleksibel,
+  jendelaScanMasuk,
+} from "@/lib/attendance/time-policy";
 import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
@@ -31,31 +35,48 @@ function parseTimeToMinutes(t: string): number | null {
 }
 
 /**
- * Kalkulasi jam kerja normal dalam satuan MENIT sesuai rumus:
- * (jamPulang - jamMasuk) - istirahat + batasMasuk
+ * Kalkulasi jam kerja normal dalam satuan MENIT.
+ * Rumus: (jamPulang - jamMasuk) - istirahat — lihat `hitungJamKerjaNormalMenit`.
  */
 function hitungJamKerjaNormalOtomatis(
   jamMasuk: string,
   jamPulang: string,
   istirahatMenit: number,
-  batasMasukMenit: number,
 ): number {
-  const mMasuk = parseTimeToMinutes(jamMasuk);
-  let mPulang = parseTimeToMinutes(jamPulang);
+  return hitungJamKerjaNormalMenit(jamMasuk, jamPulang, istirahatMenit);
+}
 
-  if (mMasuk === null || mPulang === null) return 0;
+/** "HH:mm" dari menit-dalam-hari; nilai di luar 0..1439 digulung ke hari itu. */
+function formatMenitJam(menit: number): string {
+  const normal = ((menit % 1440) + 1440) % 1440;
+  return `${String(Math.floor(normal / 60)).padStart(2, "0")}:${String(normal % 60).padStart(2, "0")}`;
+}
 
-  // Penanganan shift malam (jam pulang lebih kecil dari jam masuk)
-  if (mPulang < mMasuk) {
-    mPulang += 1440;
-  }
-
-  const total =
-    mPulang -
-    mMasuk -
-    Number(istirahatMenit || 0) +
-    Number(batasMasukMenit || 0);
-  return total > 0 ? total : 0;
+/**
+ * Pratinjau jendela absen masuk sebuah shift, dalam jam dinding:
+ * absen dibuka → mulai tepat waktu → jam masuk → batas terlambat.
+ */
+function pratinjauJendelaMasuk(
+  jamMasuk: string,
+  aturan: {
+    awal_absen_menit?: number;
+    batas_masuk_menit?: number;
+    toleransi_masuk_menit?: number;
+  },
+): { buka: string; tepatWaktu: string; masuk: string; tutup: string } | null {
+  const masuk = parseTimeToMinutes(jamMasuk);
+  if (masuk === null) return null;
+  const jendela = jendelaScanMasuk({
+    awalAbsenMenit: Number(aturan.awal_absen_menit ?? 120),
+    batasMasukMenit: Number(aturan.batas_masuk_menit ?? 60),
+    toleransiMasukMenit: Number(aturan.toleransi_masuk_menit ?? 0),
+  });
+  return {
+    buka: formatMenitJam(masuk + jendela.bukaMenit),
+    tepatWaktu: formatMenitJam(masuk + jendela.tepatWaktuMenit),
+    masuk: formatMenitJam(masuk),
+    tutup: formatMenitJam(masuk + jendela.tutupMenit),
+  };
 }
 
 function formatMinutesToHours(min: unknown): string {
@@ -157,14 +178,12 @@ export default function MobileShiftPage() {
       if (
         field === "jam_masuk" ||
         field === "jam_pulang" ||
-        field === "istirahat_menit" ||
-        field === "batas_masuk_menit"
+        field === "istirahat_menit"
       ) {
         next.jam_kerja_normal_menit = hitungJamKerjaNormalOtomatis(
           next.jam_masuk,
           next.jam_pulang,
           next.istirahat_menit ?? 60,
-          next.batas_masuk_menit ?? 60,
         );
       }
       return next;
@@ -207,7 +226,6 @@ export default function MobileShiftPage() {
             "00:00",
             "23:59",
             0,
-            0,
           ),
         };
       }
@@ -230,7 +248,6 @@ export default function MobileShiftPage() {
           masuk,
           pulang,
           istirahat,
-          batasMasuk,
         ),
       };
     });
@@ -256,7 +273,6 @@ export default function MobileShiftPage() {
       defaultMasuk,
       defaultPulang,
       defaultIstirahat,
-      defaultBatasMasuk,
     );
 
     setFormData({
@@ -306,7 +322,6 @@ export default function MobileShiftPage() {
         masuk,
         pulang,
         istirahat,
-        batasMasuk,
       ),
       istirahat_menit: istirahat,
       batas_pulang_menit: Number(row.batas_pulang_menit ?? 240),
@@ -606,7 +621,7 @@ export default function MobileShiftPage() {
                         Awal Absen:
                       </span>
                       <span className="font-semibold text-slate-200">
-                        {awalAbsen} mnt
+                        {awalAbsen} mnt sblm tepat waktu
                       </span>
                     </div>
 
@@ -615,7 +630,7 @@ export default function MobileShiftPage() {
                         Batas Tepat Waktu:
                       </span>
                       <span className="font-semibold text-emerald-300">
-                        +{batasMasuk} mnt
+                        {batasMasuk} mnt sblm masuk
                       </span>
                     </div>
 
@@ -624,9 +639,33 @@ export default function MobileShiftPage() {
                         Toleransi Terlambat:
                       </span>
                       <span className="font-semibold text-amber-300">
-                        +{toleransi} mnt
+                        +{toleransi} mnt stlh masuk
                       </span>
                     </div>
+
+                    {(() => {
+                      if (
+                        isShiftFleksibel(jamMasuk, jamPulang, jamKerjaNormal)
+                      ) {
+                        return null;
+                      }
+                      const jendela = pratinjauJendelaMasuk(jamMasuk, {
+                        awal_absen_menit: awalAbsen,
+                        batas_masuk_menit: batasMasuk,
+                        toleransi_masuk_menit: toleransi,
+                      });
+                      return jendela ? (
+                        <div className="rounded-xl bg-slate-950/40 p-2 border border-white/5 col-span-2">
+                          <span className="text-slate-500 text-[10px] block">
+                            Jendela Absen Masuk (awal → tepat → masuk → tutup):
+                          </span>
+                          <span className="font-semibold font-mono text-slate-200">
+                            {jendela.buka} → {jendela.tepatWaktu} →{" "}
+                            {jendela.masuk} → {jendela.tutup}
+                          </span>
+                        </div>
+                      ) : null;
+                    })()}
 
                     <div className="rounded-xl bg-slate-950/40 p-2 border border-white/5">
                       <span className="text-slate-500 text-[10px] block">
@@ -987,6 +1026,42 @@ export default function MobileShiftPage() {
                   />
                 </div>
               </div>
+
+              <p className="text-[10px] leading-4 text-slate-500">
+                Tepat Waktu = (Jam Masuk − Batas Masuk) s/d Jam Masuk. Awal
+                Absen dihitung mundur dari awal Tepat Waktu. Terlambat = Jam
+                Masuk s/d (Jam Masuk + Toleransi); lewat dari itu scan ditolak
+                dan karyawan menghubungi Admin/Operator.
+              </p>
+
+              {(() => {
+                const jendela = modeFleksibel
+                  ? null
+                  : pratinjauJendelaMasuk(formData.jam_masuk, formData);
+                if (!jendela) return null;
+                return (
+                  <div className="grid grid-cols-3 gap-2 rounded-xl border border-white/5 bg-slate-900/50 p-2 text-[10px] font-mono">
+                    <div>
+                      <span className="block text-slate-500">Lebih Awal</span>
+                      <span className="font-bold text-slate-200">
+                        {jendela.buka}–{jendela.tepatWaktu}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-slate-500">Tepat Waktu</span>
+                      <span className="font-bold text-emerald-300">
+                        {jendela.tepatWaktu}–{jendela.masuk}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-slate-500">Terlambat</span>
+                      <span className="font-bold text-amber-300">
+                        {jendela.masuk}–{jendela.tutup}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="grid grid-cols-2 gap-2 pt-1">
                 <div>

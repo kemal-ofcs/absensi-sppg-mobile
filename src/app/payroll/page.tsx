@@ -7,6 +7,7 @@ import { MobileAppShell } from "@/components/MobileAppShell";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
+import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { shareText } from "@/lib/client/share";
 import { useAuth } from "@/lib/context/AuthContext";
@@ -88,8 +89,11 @@ function getLastMonthRange() {
 export default function MobilePayrollPortalPage() {
   const isHydrated = useHydrated();
   const router = useRouter();
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
   const companyName = useCompanyName();
+  // Administrasi payroll (modul `payroll_admin`, salinan modul Desktop).
+  const canViewPayrollAdmin = hasPermission(user, "payroll.view");
+  const canManagePayrollConfig = hasPermission(user, "payroll.config.manage");
 
   const [activeTab, setActiveTab] = useState<"estimate" | "archive">(
     "estimate",
@@ -126,8 +130,14 @@ export default function MobilePayrollPortalPage() {
       if (empList.length > 0 && !selectedKaryawanId) {
         setSelectedKaryawanId(String(empList[0].id_unik));
       }
-    } catch {
-      // Ignore
+    } catch (err) {
+      // Diam berarti pemilih karyawan tampil kosong seolah memang tidak ada
+      // karyawan, padahal permintaannya yang gagal.
+      setFeedback({
+        type: "error",
+        message:
+          err instanceof Error ? err.message : "Daftar karyawan gagal dimuat.",
+      });
     }
   }, [selectedKaryawanId]);
 
@@ -180,8 +190,15 @@ export default function MobilePayrollPortalPage() {
       router.push("/login");
       return;
     }
+    // Otorisasi, bukan sekadar autentikasi (sama seperti Project Meksa). Tanpa
+    // baris ini setiap operator dengan sesi yang sah bisa membuka slip gaji
+    // beserta datanya. Mobile tidak punya rute `/forbidden`.
+    if (!canAccessArea(user, "payroll")) {
+      router.replace("/dashboard");
+      return;
+    }
     void loadEmployees();
-  }, [isHydrated, authLoading, isAuthenticated, loadEmployees, router]);
+  }, [isHydrated, authLoading, isAuthenticated, user, loadEmployees, router]);
 
   useEffect(() => {
     if (selectedKaryawanId) {
@@ -238,7 +255,9 @@ Status: Estimasi Real-Time ${companyName}`;
       );
       setFeedback({ type: "success", message: "Slip berhasil dibagikan." });
     } catch {
-      // User cancelled
+      // Pengguna menutup dialog berbagi. Itu PEMBATALAN, bukan kegagalan —
+      // menampilkan pesan error untuk keputusan yang disengaja hanya
+      // membingungkan.
     } finally {
       setSharing(false);
     }
@@ -304,6 +323,39 @@ Status: Estimasi Real-Time ${companyName}`;
             onClose={() => setFeedback(null)}
           />
         )}
+
+        {/* Administrasi Payroll (izin payroll.view; tiap aksi dijaga izinnya sendiri) */}
+        {canViewPayrollAdmin ? (
+          <div className="rounded-2xl border border-emerald-500/20 bg-emerald-950/20 p-3">
+            <p className="mb-2 text-[11px] font-black uppercase tracking-wider text-emerald-300">
+              Administrasi Payroll
+            </p>
+            <Link
+              href="/payroll/runs"
+              onClick={() => triggerHaptic("light")}
+              className="flex min-h-11 items-center justify-between gap-2 rounded-xl border border-white/10 bg-slate-900/80 px-3 text-xs font-bold text-slate-200 transition active:scale-95"
+            >
+              <span className="flex items-center gap-2">
+                <Icon name="history" className="size-4 text-emerald-300" />
+                Batch Payroll &amp; Persetujuan
+              </span>
+              <Icon name="chevron-right" className="size-4 text-slate-500" />
+            </Link>
+            {canManagePayrollConfig ? (
+              <Link
+                href="/payroll/config"
+                onClick={() => triggerHaptic("light")}
+                className="mt-2 flex min-h-11 items-center justify-between gap-2 rounded-xl border border-white/10 bg-slate-900/80 px-3 text-xs font-bold text-slate-200 transition active:scale-95"
+              >
+                <span className="flex items-center gap-2">
+                  <Icon name="settings" className="size-4 text-emerald-300" />
+                  Rate Gaji &amp; Komponen
+                </span>
+                <Icon name="chevron-right" className="size-4 text-slate-500" />
+              </Link>
+            ) : null}
+          </div>
+        ) : null}
 
         {/* Tab Navigation */}
         <div className="grid grid-cols-2 gap-2 p-1 bg-slate-900 border border-slate-800 rounded-2xl">

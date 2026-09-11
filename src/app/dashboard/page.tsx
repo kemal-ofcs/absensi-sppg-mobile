@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { DashboardInsights } from "@/components/dashboard/DashboardInsights";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -22,12 +23,16 @@ export default function DashboardPage() {
   const clock = useClock();
 
   const canViewMetrics = hasPermission(user, "dashboard.view");
+  // Riwayat scan terbaru dijaga `home.view` di backend. Tanpa izin itu
+  // bagiannya disembunyikan, bukan dimuat lalu gagal menjadi pesan error.
+  const canViewRecentScans = canAccessArea(user, "home");
   const canViewHistory = canAccessArea(user, "history");
   const canViewKaryawan = canAccessArea(user, "karyawan");
 
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [recentScans, setRecentScans] = useState<Record<string, unknown>[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
@@ -41,14 +46,25 @@ export default function DashboardPage() {
       try {
         const [metricData, scansData] = await Promise.all([
           canViewMetrics ? getDashboardMetrics() : Promise.resolve(null),
-          getRiwayatScan({ limit: 5 }),
+          canViewRecentScans
+            ? getRiwayatScan({ limit: 5 })
+            : Promise.resolve([] as Record<string, unknown>[]),
         ]);
         if (!cancelled) {
           setMetrics(metricData);
           setRecentScans(scansData || []);
+          setLoadError(null);
         }
-      } catch {
-        // Handled silently
+      } catch (err) {
+        // Diam berarti dasbor tampil kosong dan tidak bisa dibedakan dari hari
+        // yang memang belum ada aktivitasnya (sama seperti Project Meksa).
+        if (!cancelled) {
+          setLoadError(
+            err instanceof Error
+              ? err.message
+              : "Data dasbor gagal dimuat. Tarik ke bawah untuk mencoba lagi.",
+          );
+        }
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -59,7 +75,7 @@ export default function DashboardPage() {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, canViewMetrics]);
+  }, [isAuthenticated, canViewMetrics, canViewRecentScans]);
 
   const formattedTime = clock
     ? clock.toLocaleTimeString("id-ID", {
@@ -81,6 +97,12 @@ export default function DashboardPage() {
   return (
     <MobileAppShell>
       <div className="flex flex-col gap-4">
+        {loadError ? (
+          <div className="rounded-2xl border border-rose-400/30 bg-rose-400/10 p-3 text-xs text-rose-200">
+            {loadError}
+          </div>
+        ) : null}
+
         {/* Time & Shift Card */}
         <div className="relative overflow-hidden rounded-3xl border border-white/15 bg-gradient-to-br from-slate-900 via-slate-900/90 to-sky-950/40 p-5 shadow-2xl backdrop-blur-xl">
           <div className="flex items-center justify-between">
@@ -212,70 +234,75 @@ export default function DashboardPage() {
           </div>
         ) : null}
 
-        {/* Recent Scans Section */}
-        <div className="flex flex-col gap-2 mt-2">
-          <div className="flex items-center justify-between px-1">
-            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
-              Aktivitas Absensi Terbaru
-            </h4>
-            {canViewHistory ? (
-              <Link
-                href="/history"
-                className="text-xs font-semibold text-sky-400 hover:underline"
-              >
-                Lihat Semua →
-              </Link>
-            ) : null}
-          </div>
+        {/* Rekap bulanan & peringkat (izin dashboard.view, sama seperti Web) */}
+        {canViewMetrics ? <DashboardInsights /> : null}
 
-          {isLoading ? (
-            <div className="flex flex-col gap-2">
-              {[1, 2, 3].map((i) => (
-                <div
-                  key={i}
-                  className="h-16 rounded-2xl border border-white/5 bg-slate-900/40 animate-pulse"
-                />
-              ))}
+        {/* Recent Scans Section (izin home.view) */}
+        {canViewRecentScans ? (
+          <div className="flex flex-col gap-2 mt-2">
+            <div className="flex items-center justify-between px-1">
+              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                Aktivitas Absensi Terbaru
+              </h4>
+              {canViewHistory ? (
+                <Link
+                  href="/history"
+                  className="text-xs font-semibold text-sky-400 hover:underline"
+                >
+                  Lihat Semua →
+                </Link>
+              ) : null}
             </div>
-          ) : recentScans.length === 0 ? (
-            <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-6 text-center text-xs text-slate-500">
-              Belum ada aktivitas absensi hari ini.
-            </div>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {recentScans.map((scan, idx) => {
-                const nama = String(scan.nama || "Tanpa Nama");
-                const divisi = String(scan.divisi || "-");
-                const jam = String(scan.jam_scan || "--:--");
-                const jenis = String(scan.jenis_scan || "Scan");
-                const statusStr = String(scan.status_proses || "Berhasil");
-                const idLog = String(scan.id_log || idx);
 
-                return (
+            {isLoading ? (
+              <div className="flex flex-col gap-2">
+                {[1, 2, 3].map((i) => (
                   <div
-                    key={idLog}
-                    className="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-900/70 p-3.5 backdrop-blur-md"
-                  >
-                    <div className="flex flex-col min-w-0 pr-2">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-bold text-white truncate">
-                          {nama}
+                    key={i}
+                    className="h-16 rounded-2xl border border-white/5 bg-slate-900/40 animate-pulse"
+                  />
+                ))}
+              </div>
+            ) : recentScans.length === 0 ? (
+              <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-6 text-center text-xs text-slate-500">
+                Belum ada aktivitas absensi hari ini.
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {recentScans.map((scan, idx) => {
+                  const nama = String(scan.nama || "Tanpa Nama");
+                  const divisi = String(scan.divisi || "-");
+                  const jam = String(scan.jam_scan || "--:--");
+                  const jenis = String(scan.jenis_scan || "Scan");
+                  const statusStr = String(scan.status_proses || "Berhasil");
+                  const idLog = String(scan.id_log || idx);
+
+                  return (
+                    <div
+                      key={idLog}
+                      className="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-900/70 p-3.5 backdrop-blur-md"
+                    >
+                      <div className="flex flex-col min-w-0 pr-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-bold text-white truncate">
+                            {nama}
+                          </span>
+                          <StatusBadge status={statusStr} />
+                        </div>
+                        <span className="text-[11px] text-slate-400 mt-0.5">
+                          {divisi} • {jam} • {jenis}
                         </span>
-                        <StatusBadge status={statusStr} />
                       </div>
-                      <span className="text-[11px] text-slate-400 mt-0.5">
-                        {divisi} • {jam} • {jenis}
-                      </span>
+                      <div className="grid size-8 shrink-0 place-items-center rounded-xl bg-sky-500/10 text-sky-400 text-xs font-bold">
+                        {jenis.charAt(0)}
+                      </div>
                     </div>
-                    <div className="grid size-8 shrink-0 place-items-center rounded-xl bg-sky-500/10 text-sky-400 text-xs font-bold">
-                      {jenis.charAt(0)}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : null}
       </div>
     </MobileAppShell>
   );

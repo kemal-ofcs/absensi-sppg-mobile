@@ -57,10 +57,10 @@ export function QrFullscreenDialog({
   const handleDownload = async () => {
     try {
       const res = await downloadDataUrl(qrDataUrl, cleanFilename);
+      // Menutup dialog "Simpan ke…" adalah pembatalan, bukan keberhasilan.
+      if (res.cancelled) return;
       triggerHaptic("success");
-      setSaveStatus(
-        res.path ? `Tersimpan di ${res.path}` : "Tersimpan di Download!",
-      );
+      setSaveStatus(res.path ? `Tersimpan di ${res.path}` : "Tersimpan!");
       setTimeout(() => setSaveStatus(null), 3000);
     } catch (err) {
       triggerHaptic("error");

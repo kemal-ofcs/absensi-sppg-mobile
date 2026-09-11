@@ -15,5 +15,7 @@ pub mod turso;
 
 pub mod portability;
 pub mod payroll;
+// Administrasi payroll: SALINAN modul Desktop oleh scripts/sync-rust-modules.ts.
+pub mod payroll_admin;
 pub mod share;
 pub use config::MobileState;
