@@ -47,17 +47,25 @@ fn nama_berkas_aman(filename: &str) -> String {
 // jenis MIME — fungsi ini hanya dipakai cabang Android dan tesnya.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn mime_berkas(file_name: &str, hint: Option<&str>) -> String {
+    let ekstensi = file_name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    // Workaround Android SAF: mime type Excel resmi sangat panjang dan sering
+    // membuat Intent `ACTION_CREATE_DOCUMENT` gagal diluncurkan (ActivityNotFound)
+    // yang berujung pada hang (menunggu result selamanya) di plugin Android Tauri.
+    if ekstensi == "xlsx" {
+        return "application/octet-stream".to_owned();
+    }
+
     if let Some(hint) = hint.map(str::trim) {
         if hint.contains('/') && !hint.contains(char::is_whitespace) {
             return hint.to_owned();
         }
     }
-    let ekstensi = file_name
-        .rsplit_once('.')
-        .map(|(_, ext)| ext.to_ascii_lowercase())
-        .unwrap_or_default();
     match ekstensi.as_str() {
-        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xlsx" => "application/octet-stream",
         "csv" => "text/csv",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -100,10 +108,10 @@ pub fn share_desktop_file(
 }
 
 /// Nama command dipertahankan persis seperti sebelumnya karena frontend
-/// memanggilnya lewat `invoke("desktop_share_file", ...)` di
+/// memanggilnya lewat `invoke("mobile_share_file", ...)` di
 /// `src/lib/client/share.ts`.
 #[tauri::command]
-pub fn desktop_share_file(
+pub fn mobile_share_file(
     filename: String,
     base64_data: String,
     title: Option<String>,
@@ -301,9 +309,10 @@ mod tests {
     fn mime_mengikuti_petunjuk_yang_wajar_lalu_ekstensi() {
         assert_eq!(mime_berkas("a.csv", Some("text/csv")), "text/csv");
         // Petunjuk rusak diabaikan, jatuh ke tebakan dari ekstensi.
+        // Khusus XLSX diganti ke octet-stream untuk kompatibilitas Android SAF.
         assert_eq!(
             mime_berkas("Rekap.XLSX", Some("bukan mime")),
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "application/octet-stream"
         );
         assert_eq!(mime_berkas("qr.png", None), "image/png");
         assert_eq!(

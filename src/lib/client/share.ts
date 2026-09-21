@@ -13,7 +13,7 @@ export interface ShareResult {
 /**
  * Membagikan berkas gambar (ID Card / QR Code) ke aplikasi lain (WhatsApp, Telegram, Gmail, Drive, dll).
  * Mengutamakan Android Native Share Sheet (via AndroidBridge) pada Android WebView,
- * kemudian Tauri IPC `desktop_share_file`, dan fallback ke Web Share API / Unduhan.
+ * kemudian Tauri IPC `mobile_share_file`, dan fallback ke Web Share API / Unduhan.
  */
 export async function shareDataUrl(
   dataUrl: string,
@@ -59,7 +59,7 @@ export async function shareDataUrl(
       const res = await invokeDesktop<{
         sukses: boolean;
         path?: string;
-      }>("desktop_share_file", {
+      }>("mobile_share_file", {
         filename,
         base64Data: cleanBase64,
         title,
@@ -71,7 +71,7 @@ export async function shareDataUrl(
         };
       }
     } catch (desktopErr) {
-      console.warn("Tauri desktop_share_file failed:", desktopErr);
+      console.warn("Tauri mobile_share_file failed:", desktopErr);
     }
   }
 
@@ -148,9 +148,8 @@ export async function shareText(
         message: "Teks slip berhasil disalin ke clipboard.",
       };
     } catch {
-      // Clipboard ditolak (izin/konteks tidak aman) bukan akhir jalan: baris
-      // di bawah tetap mengembalikan sukses=false beserta pesan yang tampil
-      // ke pengguna, jadi kegagalannya tidak disembunyikan.
+      // Clipboard bisa ditolak izinnya oleh WebView. Jalur berbagi utama
+      // sudah berhasil di atas; penyalinan ini hanya kemudahan tambahan.
     }
   }
 

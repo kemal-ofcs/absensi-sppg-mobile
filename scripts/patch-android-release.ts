@@ -28,12 +28,24 @@
  * terjadi setelah identifier diganti dan `tauri android init` dijalankan ulang:
  * baris penandatanganan yang dulu ditambahkan manual ikut hilang. Bila blok
  * release belum punya `signingConfig` sama sekali, skrip ini memasang kunci
- * DEBUG (dibawa dari Project Meksa, yang pernah mengalaminya). APK hanya
+ * DEBUG — sama dengan workspace absensi-sppg asal. Konsekuensinya: APK hanya
  * cocok untuk dipasang langsung (sideload), bukan Play Store, dan APK yang
  * di-build di mesin lain bertanda tangan berbeda sehingga tidak bisa
  * memperbarui instalasi yang ada. Untuk distribusi resmi, ganti dengan
  * keystore rilis sendiri — skrip ini tidak menimpa `signingConfig` yang sudah
  * dipasang.
+ *
+ * IZIN KAMERA & LOKASI — kegagalan ketiga, dan yang paling sunyi.
+ * Template Tauri hanya mendeklarasikan `INTERNET`. WebView Tauri (wry) memang
+ * meminta izin runtime saat halaman memanggil `getUserMedia` atau
+ * `navigator.geolocation`, tetapi Android hanya mau menampilkan dialog untuk
+ * izin yang DIDEKLARASIKAN di manifest. Tanpa deklarasi, permintaannya ditolak
+ * tanpa dialog, halaman menerima `NotAllowedError`, dan Pengaturan aplikasi
+ * bahkan tidak punya entri Kamera untuk dinyalakan manual. Pemindai QR, foto
+ * bukti scan, verifikasi wajah "Lupa Password", dan geofence mati semuanya.
+ * `uses-feature ... required="false"` menyertai keduanya: tanpa itu, izin
+ * kamera/lokasi menyiratkan perangkat WAJIB punya kamera dan GPS, sehingga
+ * tablet tanpa kamera belakang tidak bisa memasang aplikasinya.
  *
  * Aturan lengkapnya:
  * `.agents/skills/absensi-sppg-rules/references/04-hardware-and-android-lifecycle.md`
@@ -47,6 +59,10 @@ const gradle = join(akarMobile, "src-tauri/gen/android/app/build.gradle.kts");
 const proguard = join(
   akarMobile,
   "src-tauri/gen/android/app/proguard-rules.pro",
+);
+const manifest = join(
+  akarMobile,
+  "src-tauri/gen/android/app/src/main/AndroidManifest.xml",
 );
 const tauriConf = join(akarMobile, "src-tauri/tauri.conf.json");
 
@@ -144,12 +160,137 @@ if (hilang.length > 0) {
   berubah = true;
 }
 
-// ── 3. Verifikasi — inilah yang membedakan skrip ini dari sekadar menambal ──
+// ── 3. Izin kamera & lokasi di manifest ─────────────────────────────────────
+const deklarasiIzin = [
+  '<uses-permission android:name="android.permission.CAMERA" />',
+  '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
+  '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
+  '<uses-feature android:name="android.hardware.camera" android:required="false" />',
+  '<uses-feature android:name="android.hardware.location.gps" android:required="false" />',
+];
+/** Dicocokkan per nama, bukan per baris utuh: spasi atau atribut tambahan dari template tidak boleh membuat deklarasi dianggap hilang. */
+const namaDeklarasi = (baris: string) =>
+  /android:name="([^"]+)"/.exec(baris)?.[1] ?? baris;
+const sudahDideklarasikan = (isi: string, baris: string) =>
+  isi.includes(`android:name="${namaDeklarasi(baris)}"`);
+
+let isiManifest = existsSync(manifest) ? readFileSync(manifest, "utf8") : "";
+const izinHilang = deklarasiIzin.filter(
+  (baris) => !sudahDideklarasikan(isiManifest, baris),
+);
+if (izinHilang.length > 0) {
+  const titikSisip = isiManifest.indexOf("<application");
+  if (titikSisip < 0) {
+    keluarDenganPesan(
+      "Tag `<application` tidak ditemukan di AndroidManifest.xml.\n" +
+        "   Bentuk template Tauri berubah — periksa berkasnya sebelum menambal\n" +
+        "   secara otomatis.",
+    );
+  }
+  const sisipan = `<!-- Izin wajib proyek (dipasang ulang oleh patch-android-release.ts) -->\n    ${izinHilang.join("\n    ")}\n\n    `;
+  isiManifest =
+    isiManifest.slice(0, titikSisip) + sisipan + isiManifest.slice(titikSisip);
+  writeFileSync(manifest, isiManifest);
+  berubah = true;
+}
+
+// ── 4. Nama aplikasi di peluncur Android ────────────────────────────────────
+//
+// `productName` di `tauri.conf.json` hanya dibaca saat `tauri android init`
+// MEMBUAT `strings.xml`. Pada proyek Android yang sudah terlanjur ada — dan
+// direktori itu ada di setiap mesin yang pernah build — mengganti nama di
+// konfigurasi tidak mengubah apa pun: APK-nya tetap terpasang dengan nama
+// lama, dan build tetap hijau. Karena itu namanya ditambal dari SATU sumber
+// yang sama seperti nama paket, bukan ditulis ulang di dua tempat.
+function bacaProductName(): string {
+  const konfigurasi = JSON.parse(readFileSync(tauriConf, "utf8")) as {
+    productName?: string;
+  };
+  const nilai = konfigurasi.productName?.trim();
+  if (!nilai) {
+    keluarDenganPesan("`productName` tidak ada di src-tauri/tauri.conf.json.");
+  }
+  return nilai;
+}
+
+/** Teks XML: hanya tiga karakter yang benar-benar wajib di-escape di sini. */
+const escapeXml = (nilai: string) =>
+  nilai.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const productName = bacaProductName();
+const namaAplikasi = escapeXml(productName);
+const stringsXml = join(
+  akarMobile,
+  "src-tauri/gen/android/app/src/main/res/values/strings.xml",
+);
+
+if (existsSync(stringsXml)) {
+  const isiAwal = readFileSync(stringsXml, "utf8");
+  let isiStrings = isiAwal;
+  for (const kunci of ["app_name", "main_activity_title"]) {
+    const pola = new RegExp(
+      `(<string name="${kunci}">)([\\s\\S]*?)(</string>)`,
+    );
+    if (pola.test(isiStrings)) {
+      // Template Tauri membungkus nilainya dengan tanda kutip di dalam tag;
+      // bentuk itu dipertahankan supaya spasi di awal/akhir tidak dipangkas
+      // Android.
+      isiStrings = isiStrings.replace(pola, `$1"${namaAplikasi}"$3`);
+    } else {
+      isiStrings = isiStrings.replace(
+        "</resources>",
+        `    <string name="${kunci}">"${namaAplikasi}"</string>\n</resources>`,
+      );
+    }
+  }
+  if (isiStrings !== isiAwal) {
+    writeFileSync(stringsXml, isiStrings);
+    berubah = true;
+  }
+}
+
+// ── 4b. Aktifkan WebView Debugging di MainActivity ─────────────────────────
+const mainActivityPath = join(
+  akarMobile,
+  "src-tauri/gen/android/app/src/main/java",
+  ...identifier.split("."),
+  "MainActivity.kt",
+);
+
+if (existsSync(mainActivityPath)) {
+  let isiActivity = readFileSync(mainActivityPath, "utf8");
+  if (!isiActivity.includes("setWebContentsDebuggingEnabled")) {
+    if (!isiActivity.includes("import android.webkit.WebView")) {
+      isiActivity = isiActivity.replace(
+        "import android.os.Bundle",
+        "import android.os.Bundle\nimport android.webkit.WebView",
+      );
+    }
+    isiActivity = isiActivity.replace(
+      "super.onCreate(savedInstanceState)",
+      "super.onCreate(savedInstanceState)\n    WebView.setWebContentsDebuggingEnabled(true)",
+    );
+    writeFileSync(mainActivityPath, isiActivity);
+    berubah = true;
+  }
+}
+
+// ── 5. Verifikasi — inilah yang membedakan skrip ini dari sekadar menambal ──
 const gradleAkhir = readFileSync(gradle, "utf8");
 const releaseAkhir = blokRelease.exec(gradleAkhir)?.[2] ?? "";
 const proguardAkhir = readFileSync(proguard, "utf8");
+const manifestAkhir = existsSync(manifest)
+  ? readFileSync(manifest, "utf8")
+  : "";
 
 const gagal: string[] = [];
+for (const baris of deklarasiIzin) {
+  if (!sudahDideklarasikan(manifestAkhir, baris)) {
+    gagal.push(
+      `AndroidManifest.xml: ${namaDeklarasi(baris)} tidak dideklarasikan — kamera/lokasi ditolak tanpa dialog`,
+    );
+  }
+}
 if (!/isMinifyEnabled\s*=\s*false/.test(releaseAkhir)) {
   gagal.push("build.gradle.kts: `isMinifyEnabled = false` tidak terpasang");
 }
@@ -164,6 +305,19 @@ if (!/signingConfig\s*=/.test(releaseAkhir)) {
 for (const baris of aturan) {
   if (!proguardAkhir.includes(baris)) {
     gagal.push(`proguard-rules.pro: aturan hilang — ${baris}`);
+  }
+}
+if (existsSync(stringsXml)) {
+  const stringsAkhir = readFileSync(stringsXml, "utf8");
+  for (const kunci of ["app_name", "main_activity_title"]) {
+    const nilai = new RegExp(`<string name="${kunci}">"?([^"<]*)"?</string>`)
+      .exec(stringsAkhir)?.[1]
+      ?.trim();
+    if (nilai !== namaAplikasi) {
+      gagal.push(
+        `strings.xml: ${kunci} masih "${nilai ?? "(tidak ada)"}" — APK akan terpasang dengan nama lama`,
+      );
+    }
   }
 }
 

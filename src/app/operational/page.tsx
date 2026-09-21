@@ -5,13 +5,14 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
-import { canAccessArea } from "@/lib/auth/access";
+import { canAccessArea, hasPermission } from "@/lib/auth/access";
 import { triggerHaptic } from "@/lib/client/haptics";
 import { useAuth } from "@/lib/context/AuthContext";
 import {
   batalkanPenugasanBackup,
   buatPenugasanBackup,
   getDaftarBackup,
+  hapusPenugasanBackup,
 } from "@/lib/gateways/backup";
 import {
   getDaftarKoreksi,
@@ -101,6 +102,7 @@ export default function OperationalPage() {
   const [manKeterangan, setManKeterangan] = useState<string>("");
 
   const isOperational = canAccessArea(user, "operational");
+  const canDeleteOperational = hasPermission(user, "operational.delete");
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
@@ -404,6 +406,47 @@ export default function OperationalPage() {
         message:
           err instanceof Error ? err.message : "Koreksi admin gagal dihapus.",
       });
+    }
+  };
+
+  const handleDeleteBackup = async (
+    idBackup: string,
+    namaPengganti: string,
+    namaAsal: string,
+    tanggal: string,
+  ) => {
+    const setuju = await konfirmasi({
+      judul: "Hapus Penugasan Backup?",
+      pesan: `Apakah kamu ingin menghapus penugasan backup ini: ${tanggal}, ${namaPengganti} menggantikan ${namaAsal}? Data yang dihapus tidak dapat dikembalikan.`,
+      teksBatal: "Batal",
+      teksKonfirmasi: "Hapus",
+      bahaya: true,
+    });
+    if (!setuju) return;
+
+    setLoading(true);
+    setFeedback(null);
+    try {
+      const res = await hapusPenugasanBackup(idBackup);
+      if (res.sukses) {
+        triggerHaptic("success");
+        setFeedback({ tone: "success", text: res.pesan });
+        await loadTabRecords(date, "backup");
+      } else {
+        triggerHaptic("error");
+        setFeedback({ tone: "error", text: res.pesan });
+      }
+    } catch (err) {
+      triggerHaptic("error");
+      setFeedback({
+        tone: "error",
+        text:
+          err instanceof Error
+            ? err.message
+            : "Gagal menghapus penugasan backup.",
+      });
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -899,13 +942,39 @@ export default function OperationalPage() {
                           {String(item.id_shift_backup)}
                         </span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => handleCancelBackup(idBck)}
-                        className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-2.5 py-1 text-[10px] font-bold text-rose-300 hover:bg-rose-500/20 active:scale-95 transition shrink-0"
-                      >
-                        Batalkan
-                      </button>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleCancelBackup(idBck)}
+                          className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-2.5 py-1 text-[10px] font-bold text-rose-300 hover:bg-rose-500/20 active:scale-95 transition shrink-0"
+                        >
+                          Batalkan
+                        </button>
+                        {canDeleteOperational ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleDeleteBackup(
+                                idBck,
+                                String(
+                                  item.nama_pengganti ||
+                                    item.id_karyawan_pengganti ||
+                                    "-",
+                                ),
+                                String(
+                                  item.nama_asal ||
+                                    item.id_karyawan_asal ||
+                                    "-",
+                                ),
+                                String(item.tanggal_tugas || date),
+                              )
+                            }
+                            className="rounded-xl border border-red-500/30 bg-red-950/40 px-2.5 py-1 text-[10px] font-bold text-red-300 hover:bg-red-900/50 active:scale-95 transition shrink-0"
+                          >
+                            Hapus
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
                   );
                 })

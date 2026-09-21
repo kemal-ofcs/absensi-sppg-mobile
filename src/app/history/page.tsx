@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -15,6 +15,7 @@ import {
   editAbsensiHarian,
   getRekapHarian,
   getRiwayatScan,
+  hapusAbsensiHarian,
   hapusLogScan,
 } from "@/lib/gateways/report";
 import { useDebounce } from "@/lib/hooks/useDebounce";
@@ -34,37 +35,58 @@ interface EditAbsensiDraft {
   keterangan: string;
 }
 
-interface DeleteScanTarget {
-  id_log: number;
-  nama: string;
-  id_karyawan: string;
-  jenis_scan: string;
-  jam_scan: string;
-}
+type DeleteTarget =
+  | {
+      type: "scan";
+      id_log: number;
+      nama: string;
+      id_karyawan: string;
+      jenis_scan: string;
+      jam_scan: string;
+    }
+  | {
+      type: "daily";
+      id_sesi: string;
+      nama: string;
+      id_karyawan: string;
+      tanggal: string;
+    };
 
 /**
- * Backend membatasi log scan per permintaan (bawaan 200, maksimal 500). Satu
- * hari di instansi besar bisa melebihi itu — 800 orang x 2 scan — jadi halaman
- * diambil sampai habis. Tanpa ini daftar DAN ekspor terpotong diam-diam.
+ * Backend membatasi baris per permintaan: log scan bawaan 200 (maks 500),
+ * rekap harian maks 2.000. Satu hari di sekolah besar bisa melebihi batas log
+ * scan — 800 orang x 2 scan — jadi halaman diambil sampai habis. Tanpa ini
+ * daftar DAN ekspor terpotong diam-diam.
  */
 const SCAN_PAGE_SIZE = 500;
 /** Pagar pengaman: bug di sisi lain tidak boleh jadi perulangan tanpa akhir. */
-const MAX_SCAN_PAGES = 40;
+const MAX_PAGES = 40;
 
-async function fetchAllScanLogs(tanggal: string) {
+async function fetchAllPages(
+  fetchPage: (
+    limit: number,
+    offset: number,
+  ) => Promise<Record<string, unknown>[]>,
+  pageSize: number,
+) {
   const all: Record<string, unknown>[] = [];
-  for (let page = 0; page < MAX_SCAN_PAGES; page++) {
-    const batch =
-      (await getRiwayatScan({
-        tanggal,
-        limit: SCAN_PAGE_SIZE,
-        offset: page * SCAN_PAGE_SIZE,
-      })) ?? [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const batch = (await fetchPage(pageSize, page * pageSize)) ?? [];
     all.push(...batch);
-    if (batch.length < SCAN_PAGE_SIZE) break;
+    if (batch.length < pageSize) break;
   }
   return all;
 }
+
+const fetchAllScanLogs = (tanggal_mulai: string, tanggal_selesai: string) =>
+  fetchAllPages(
+    (limit, offset) =>
+      getRiwayatScan({ tanggal_mulai, tanggal_selesai, limit, offset }),
+    SCAN_PAGE_SIZE,
+  );
+
+const fetchAllDaily = async (tanggal_mulai: string, tanggal_selesai: string) =>
+  (await getRekapHarian({ tanggal_mulai, tanggal_selesai })) ?? [];
 
 const EDIT_INPUT_CLASS =
   "min-h-11 w-full rounded-xl border border-white/15 bg-slate-950 px-3 text-xs text-white outline-none focus:border-sky-400";
@@ -122,7 +144,10 @@ export default function HistoryPage() {
   const canDeleteHistory = hasPermission(user, "history.delete");
 
   const [activeTab, setActiveTab] = useState<HistoryTab>("daily");
-  const [date, setDate] = useState<string>(
+  const [tanggalMulai, setTanggalMulai] = useState<string>(
+    () => new Date().toISOString().split("T")[0],
+  );
+  const [tanggalSelesai, setTanggalSelesai] = useState<string>(
     () => new Date().toISOString().split("T")[0],
   );
   const [dailyRecords, setDailyRecords] = useState<Record<string, unknown>[]>(
@@ -145,9 +170,7 @@ export default function HistoryPage() {
 
   // CRUD State
   const [editData, setEditData] = useState<EditAbsensiDraft | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<DeleteScanTarget | null>(
-    null,
-  );
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const isSubmittingRef = useRef(false);
   const [exporting, setExporting] = useState(false);
@@ -163,57 +186,71 @@ export default function HistoryPage() {
       router.replace("/login");
       return;
     }
-    // Ditolak izin area: dipulangkan, sama seperti Project Meksa. Mobile
-    // memakai static export dan tidak punya rute `/forbidden`.
+    // Ditolak izin area: dipulangkan, bukan dibiarkan menatap layar kosong.
+    // Sebelumnya `canViewHistory` hanya menahan pemuatan data, sehingga operator
+    // tanpa hak melihat halaman kosong tanpa satu pun penjelasan.
+    //
+    // Mobile memakai static export dan tidak punya rute `/forbidden`.
     if (!authLoading && isAuthenticated && !canViewHistory) {
       router.replace("/dashboard");
     }
   }, [authLoading, isAuthenticated, canViewHistory, router]);
 
-  const loadData = useCallback(async (targetDate: string, tab: HistoryTab) => {
-    setIsLoading(true);
-    try {
-      if (tab === "daily") {
-        const data = await getRekapHarian({ tanggal: targetDate });
-        setDailyRecords(data || []);
-      } else {
-        setScanLogs(await fetchAllScanLogs(targetDate));
+  const loadData = useCallback(
+    async (mulai: string, selesai: string, tab: HistoryTab) => {
+      setIsLoading(true);
+      try {
+        if (tab === "daily") {
+          setDailyRecords(await fetchAllDaily(mulai, selesai));
+        } else {
+          setScanLogs(await fetchAllScanLogs(mulai, selesai));
+        }
+      } catch {
+        if (tab === "daily") setDailyRecords([]);
+        else setScanLogs([]);
+      } finally {
+        setIsLoading(false);
       }
-    } catch {
-      if (tab === "daily") setDailyRecords([]);
-      else setScanLogs([]);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (isAuthenticated && canViewHistory) {
-      void loadData(date, activeTab);
+      void loadData(tanggalMulai, tanggalSelesai, activeTab);
     }
-  }, [date, activeTab, isAuthenticated, canViewHistory, loadData]);
+  }, [
+    tanggalMulai,
+    tanggalSelesai,
+    activeTab,
+    isAuthenticated,
+    canViewHistory,
+    loadData,
+  ]);
 
   useEffect(() => {
     const onSyncCompleted = () => {
       if (isAuthenticated && canViewHistory) {
-        void loadData(date, activeTab);
+        void loadData(tanggalMulai, tanggalSelesai, activeTab);
       }
     };
     window.addEventListener("sppg:sync-completed", onSyncCompleted);
     return () => {
       window.removeEventListener("sppg:sync-completed", onSyncCompleted);
     };
-  }, [date, activeTab, isAuthenticated, canViewHistory, loadData]);
+  }, [
+    tanggalMulai,
+    tanggalSelesai,
+    activeTab,
+    isAuthenticated,
+    canViewHistory,
+    loadData,
+  ]);
 
   const handleTabChange = (tab: HistoryTab) => {
     triggerHaptic("light");
     setActiveTab(tab);
     setStatusFilter("Semua");
-  };
-
-  const handleDateChange = (newDate: string) => {
-    triggerHaptic("light");
-    setDate(newDate);
   };
 
   const openEditDaily = (rec: Record<string, unknown>) => {
@@ -223,7 +260,7 @@ export default function HistoryPage() {
       id_sesi: String(rec.id_sesi || ""),
       nama: String(rec.nama || ""),
       id_karyawan: String(rec.id_karyawan || ""),
-      tanggal: String(rec.tanggal || date),
+      tanggal: String(rec.tanggal || tanggalMulai),
       jam_masuk: toTimeInput(rec.jam_masuk),
       jam_pulang: toTimeInput(rec.jam_pulang),
       status_kehadiran: String(rec.status_kehadiran || "Hadir"),
@@ -232,10 +269,23 @@ export default function HistoryPage() {
     });
   };
 
+  const openDeleteDaily = (rec: Record<string, unknown>) => {
+    triggerHaptic("warning");
+    setSelectedDaily(null);
+    setDeleteTarget({
+      type: "daily",
+      id_sesi: String(rec.id_sesi || ""),
+      nama: String(rec.nama || "-"),
+      id_karyawan: String(rec.id_karyawan || "-"),
+      tanggal: String(rec.tanggal || tanggalMulai),
+    });
+  };
+
   const openDeleteScanLog = (log: Record<string, unknown>) => {
     triggerHaptic("warning");
     setSelectedScanLog(null);
     setDeleteTarget({
+      type: "scan",
       id_log: Number(log.id_log),
       nama: String(log.nama || "-"),
       id_karyawan: String(log.id_karyawan || "-"),
@@ -268,7 +318,7 @@ export default function HistoryPage() {
         triggerHaptic("success");
         setFeedback({ type: "success", message: result.pesan });
         setEditData(null);
-        void loadData(date, activeTab);
+        void loadData(tanggalMulai, tanggalSelesai, activeTab);
       } else {
         triggerHaptic("error");
         setFeedback({ type: "error", message: result.pesan });
@@ -291,12 +341,15 @@ export default function HistoryPage() {
     setActionBusy(true);
     setFeedback(null);
     try {
-      const result = await hapusLogScan(deleteTarget.id_log);
+      const result =
+        deleteTarget.type === "daily"
+          ? await hapusAbsensiHarian(deleteTarget.id_sesi)
+          : await hapusLogScan(deleteTarget.id_log);
       if (result.sukses) {
         triggerHaptic("success");
         setFeedback({ type: "success", message: result.pesan });
         setDeleteTarget(null);
-        void loadData(date, activeTab);
+        void loadData(tanggalMulai, tanggalSelesai, activeTab);
       } else {
         triggerHaptic("error");
         setFeedback({ type: "error", message: result.pesan });
@@ -377,8 +430,8 @@ export default function HistoryPage() {
     try {
       const data =
         activeTab === "daily"
-          ? buildDailyExport(rows, date)
-          : buildScanLogExport(rows, date);
+          ? buildDailyExport(rows, tanggalMulai, tanggalSelesai)
+          : buildScanLogExport(rows, tanggalMulai, tanggalSelesai);
       const res =
         format === "csv"
           ? await exportToCsv(data.filename, data.headers, data.rows)
@@ -396,6 +449,7 @@ export default function HistoryPage() {
         message: `${rows.length} baris diekspor ke ${format === "csv" ? "CSV" : "Excel"}${res.path ? ` (${res.path})` : ""}.`,
       });
     } catch (err) {
+      console.error("Ekspor riwayat gagal:", err);
       triggerHaptic("error");
       setFeedback({
         type: "error",
@@ -448,7 +502,7 @@ export default function HistoryPage() {
             </h2>
             <button
               type="button"
-              onClick={() => loadData(date, activeTab)}
+              onClick={() => loadData(tanggalMulai, tanggalSelesai, activeTab)}
               aria-label="Muat ulang data"
               className="grid size-9 place-items-center rounded-xl bg-white/10 text-slate-300 hover:bg-white/20 active:scale-95 transition"
             >
@@ -487,15 +541,38 @@ export default function HistoryPage() {
             </button>
           </div>
 
-          {/* Date Picker */}
-          <div className="flex flex-col gap-2">
-            <input
-              type="date"
-              aria-label="Tanggal riwayat"
-              value={date}
-              onChange={(e) => handleDateChange(e.target.value)}
-              className="w-full rounded-2xl border border-white/15 bg-slate-950 px-4 py-2.5 text-xs font-semibold text-white focus:border-sky-400 focus:outline-none font-mono"
-            />
+          {/* Date Pickers */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] text-slate-400 font-semibold uppercase px-1">
+                Dari Tanggal
+              </span>
+              <input
+                type="date"
+                aria-label="Tanggal mulai"
+                value={tanggalMulai}
+                onChange={(e) => {
+                  triggerHaptic("light");
+                  setTanggalMulai(e.target.value);
+                }}
+                className="w-full rounded-2xl border border-white/15 bg-slate-950 px-4 py-2.5 text-xs font-semibold text-white focus:border-sky-400 focus:outline-none font-mono"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] text-slate-400 font-semibold uppercase px-1">
+                Sampai Tanggal
+              </span>
+              <input
+                type="date"
+                aria-label="Tanggal selesai"
+                value={tanggalSelesai}
+                onChange={(e) => {
+                  triggerHaptic("light");
+                  setTanggalSelesai(e.target.value);
+                }}
+                className="w-full rounded-2xl border border-white/15 bg-slate-950 px-4 py-2.5 text-xs font-semibold text-white focus:border-sky-400 focus:outline-none font-mono"
+              />
+            </div>
           </div>
 
           {/* Search Input */}
@@ -937,16 +1014,28 @@ export default function HistoryPage() {
               </div>
             </div>
 
-            {canEditHistory ? (
-              <button
-                type="button"
-                onClick={() => openEditDaily(selectedDaily)}
-                className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/15 text-xs font-black text-amber-200 transition hover:bg-amber-500/25 active:scale-95"
-              >
-                <span aria-hidden="true">✏️</span>
-                <span>Edit Data Absensi</span>
-              </button>
-            ) : null}
+            <div className="flex flex-col gap-2 pt-1">
+              {canEditHistory ? (
+                <button
+                  type="button"
+                  onClick={() => openEditDaily(selectedDaily)}
+                  className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/15 text-xs font-black text-amber-200 transition hover:bg-amber-500/25 active:scale-95"
+                >
+                  <span aria-hidden="true">✏️</span>
+                  <span>Edit Data Absensi</span>
+                </button>
+              ) : null}
+              {canDeleteHistory ? (
+                <button
+                  type="button"
+                  onClick={() => openDeleteDaily(selectedDaily)}
+                  className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-rose-500/40 bg-rose-500/15 text-xs font-black text-rose-200 transition hover:bg-rose-500/25 active:scale-95"
+                >
+                  <Icon name="trash" className="size-4" />
+                  <span>Hapus Data Absensi Ini</span>
+                </button>
+              ) : null}
+            </div>
           </div>
         )}
       </Modal>
@@ -1252,13 +1341,17 @@ export default function HistoryPage() {
         ) : null}
       </Modal>
 
-      {/* Modal Konfirmasi Hapus Log Scan */}
+      {/* Modal Konfirmasi Hapus */}
       <Modal
         isOpen={Boolean(deleteTarget)}
         onClose={() => {
           if (!actionBusy) setDeleteTarget(null);
         }}
-        title="Hapus Log Scan"
+        title={
+          deleteTarget?.type === "daily"
+            ? "Hapus Absensi Harian"
+            : "Hapus Log Scan"
+        }
         titleId="history-delete-modal-title"
         maxWidth="max-w-sm"
         hideFooter
@@ -1266,13 +1359,27 @@ export default function HistoryPage() {
         {deleteTarget ? (
           <div className="flex flex-col gap-4 text-xs">
             <div className="space-y-1 rounded-2xl border border-rose-500/20 bg-rose-950/30 p-3.5">
-              <p className="text-sm font-bold text-white">
-                Hapus log scan #{deleteTarget.id_log}?
-              </p>
-              <p className="text-slate-300">
-                {deleteTarget.nama} ({deleteTarget.id_karyawan}) — Scan{" "}
-                {deleteTarget.jenis_scan} pukul {deleteTarget.jam_scan}
-              </p>
+              {deleteTarget.type === "daily" ? (
+                <>
+                  <p className="text-sm font-bold text-white">
+                    Apakah kamu ingin menghapus baris ini (
+                    {deleteTarget.tanggal}), ({deleteTarget.nama}) ?
+                  </p>
+                  <p className="text-slate-300">
+                    ID Karyawan: {deleteTarget.id_karyawan}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-bold text-white">
+                    Hapus log scan #{deleteTarget.id_log}?
+                  </p>
+                  <p className="text-slate-300">
+                    {deleteTarget.nama} ({deleteTarget.id_karyawan}) — Scan{" "}
+                    {deleteTarget.jenis_scan} pukul {deleteTarget.jam_scan}
+                  </p>
+                </>
+              )}
               <p className="pt-1 text-[11px] text-amber-300">
                 Tindakan ini permanen dan akan mencatat jejak audit operator.
               </p>

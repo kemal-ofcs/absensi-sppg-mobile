@@ -59,9 +59,13 @@ export interface HistoryExport {
   rows: Cell[][];
 }
 
-export function buildScanLogExport(rows: Row[], date: string): HistoryExport {
+export function buildScanLogExport(
+  rows: Row[],
+  tanggalMulai: string,
+  tanggalSelesai: string,
+): HistoryExport {
   return {
-    filename: `Riwayat_Log_Scan_${date}`,
+    filename: `Riwayat_Log_Scan_${tanggalMulai}_sd_${tanggalSelesai}`,
     sheetName: "Log Scan",
     headers: [
       "Timestamp_Scan",
@@ -100,9 +104,13 @@ export function buildScanLogExport(rows: Row[], date: string): HistoryExport {
   };
 }
 
-export function buildDailyExport(rows: Row[], date: string): HistoryExport {
+export function buildDailyExport(
+  rows: Row[],
+  tanggalMulai: string,
+  tanggalSelesai: string,
+): HistoryExport {
   return {
-    filename: `Riwayat_Absensi_Harian_${date}`,
+    filename: `Riwayat_Absensi_Harian_${tanggalMulai}_sd_${tanggalSelesai}`,
     sheetName: "Absensi Harian",
     headers: [
       "Tanggal",
