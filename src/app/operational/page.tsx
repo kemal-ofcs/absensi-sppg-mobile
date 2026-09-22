@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -415,38 +415,42 @@ export default function OperationalPage() {
     namaAsal: string,
     tanggal: string,
   ) => {
-    const setuju = await konfirmasi({
-      judul: "Hapus Penugasan Backup?",
-      pesan: `Apakah kamu ingin menghapus penugasan backup ini: ${tanggal}, ${namaPengganti} menggantikan ${namaAsal}? Data yang dihapus tidak dapat dikembalikan.`,
-      teksBatal: "Batal",
-      teksKonfirmasi: "Hapus",
-      bahaya: true,
-    });
-    if (!setuju) return;
+    if (
+      !confirm(
+        `Apakah kamu ingin menghapus penugasan backup ini: ${tanggal}, ${namaPengganti} menggantikan ${namaAsal}? Data yang dihapus tidak dapat dikembalikan.`,
+      )
+    )
+      return;
 
-    setLoading(true);
+    setBusy(true);
     setFeedback(null);
     try {
       const res = await hapusPenugasanBackup(idBackup);
       if (res.sukses) {
         triggerHaptic("success");
-        setFeedback({ tone: "success", text: res.pesan });
+        setFeedback({
+          type: "success",
+          message: res.pesan || "Penugasan backup berhasil dihapus.",
+        });
         await loadTabRecords(date, "backup");
       } else {
         triggerHaptic("error");
-        setFeedback({ tone: "error", text: res.pesan });
+        setFeedback({
+          type: "error",
+          message: res.pesan || "Penugasan backup gagal dihapus.",
+        });
       }
     } catch (err) {
       triggerHaptic("error");
       setFeedback({
-        tone: "error",
-        text:
+        type: "error",
+        message:
           err instanceof Error
             ? err.message
             : "Gagal menghapus penugasan backup.",
       });
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   };
 

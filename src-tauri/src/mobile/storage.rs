@@ -559,6 +559,12 @@ pub fn initialize(path: &Path) -> Result<(), String> {
       CREATE INDEX IF NOT EXISTS idx_local_payroll_items_karyawan ON payroll_items(id_karyawan);
       CREATE INDEX IF NOT EXISTS idx_local_payroll_runs_status ON payroll_runs(status, period_start);
       CREATE INDEX IF NOT EXISTS idx_local_salary_configs_karyawan ON salary_configs(id_karyawan, effective_date DESC);
+      CREATE TABLE IF NOT EXISTS personil_foto (
+        id_unik TEXT PRIMARY KEY,
+        foto_mime TEXT NOT NULL DEFAULT 'image/jpeg',
+        foto_base64 TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       -- Tarif default payroll di-seed terpisah dari `super::payroll_seed`, satu
       -- sumber bersama dengan seed cloud di `turso.rs`. Jangan tulis ulang di sini.
       INSERT OR IGNORE INTO desktop_schema_migration (version, name, applied_at)
@@ -569,6 +575,8 @@ pub fn initialize(path: &Path) -> Result<(), String> {
       VALUES (3, 'mobile-offline-import-foundation', unixepoch());
       INSERT OR IGNORE INTO desktop_schema_migration (version, name, applied_at)
       VALUES (4, 'mobile-payroll-foundation', unixepoch());
+      INSERT OR IGNORE INTO desktop_schema_migration (version, name, applied_at)
+      VALUES (5, 'desktop-personnel-photo', unixepoch());
       "#,
         )
         .map_err(|_| "Schema keamanan Mobile tidak dapat diinisialisasi.".to_owned())?;
@@ -801,6 +809,7 @@ const CLOUD_MIRRORED_TABLES: &[&str] = &[
     "overtime_tier_rules",
     "tax_rules",
     "bpjs_rules",
+    "personil_foto",
 ];
 
 /// Membuang seluruh jejak database cloud lama ketika perangkat dipindahkan ke
@@ -1135,7 +1144,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("migration count");
-        assert_eq!(migrations, 4);
+        assert_eq!(migrations, 5);
     }
 
     /// Pindah database cloud harus membuang seluruh cache database lama, tetapi

@@ -2,6 +2,10 @@
 
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
+import {
+  PersonnelPhotoField,
+  type StagedPhotoData,
+} from "@/components/PersonnelPhotoField";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Modal } from "@/components/ui/Modal";
 import { triggerHaptic } from "@/lib/client/haptics";
@@ -10,6 +14,7 @@ import {
   tambahKaryawan,
   updateKaryawan,
 } from "@/lib/gateways/employee";
+import { simpanFotoPersonil } from "@/lib/gateways/personnel-photo";
 import {
   createEmployeeIdentifiers,
   firstValidationMessage,
@@ -72,6 +77,7 @@ export function EmployeeFormModal({
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [stagedPhoto, setStagedPhoto] = useState<StagedPhotoData | null>(null);
   const isEditing = mode === "edit";
   const prevOpenRef = useRef(false);
 
@@ -80,6 +86,7 @@ export function EmployeeFormModal({
     if (!prevOpenRef.current && isOpen) {
       setFormErrors({});
       setErrorMsg(null);
+      setStagedPhoto(null);
       isSubmittingRef.current = false;
 
       if (mode === "edit" && initialData) {
@@ -130,6 +137,20 @@ export function EmployeeFormModal({
         onSuccess(`Data karyawan ${formData.nama} berhasil diperbarui.`);
       } else {
         await tambahKaryawan(formData);
+        if (stagedPhoto?.base64) {
+          try {
+            await simpanFotoPersonil(
+              formData.id_unik,
+              stagedPhoto.base64,
+              stagedPhoto.mime || "image/jpeg",
+            );
+          } catch (photoErr) {
+            console.warn(
+              "Gagal menyimpan foto saat tambah karyawan:",
+              photoErr,
+            );
+          }
+        }
         onSuccess(`Karyawan baru ${formData.nama} berhasil ditambahkan.`);
       }
       triggerHaptic("success");
@@ -182,6 +203,16 @@ export function EmployeeFormModal({
         className="space-y-3.5 text-xs"
         noValidate
       >
+        {/* Foto Resmi Personil */}
+        <PersonnelPhotoField
+          idUnik={isEditing ? formData.id_unik : undefined}
+          nama={formData.nama}
+          disabled={isSubmitting}
+          stagedMode={!isEditing}
+          stagedPhoto={stagedPhoto}
+          onPhotoStaged={setStagedPhoto}
+        />
+
         {/* 1 & 2. ID Unik & Kode Karyawan */}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>

@@ -1,6 +1,8 @@
+import { useEffect, useState } from "react";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { triggerHaptic } from "@/lib/client/haptics";
+import { ambilFotoPersonil } from "@/lib/gateways/personnel-photo";
 
 interface EmployeeCardProps {
   employee: Record<string, unknown>;
@@ -47,6 +49,34 @@ export function EmployeeCard({ employee, onOpenDetail }: EmployeeCardProps) {
   const isAktif = statusAktif === "Aktif";
   const isBackup = statusBackup === "BACKUP";
 
+  const [photoUrl, setPhotoUrl] = useState<string | null>(
+    typeof employee.avatar_url === "string" ? employee.avatar_url : null,
+  );
+
+  useEffect(() => {
+    if (typeof employee.avatar_url === "string" && employee.avatar_url) {
+      setPhotoUrl(employee.avatar_url);
+      return;
+    }
+    let active = true;
+    if (!idUnik || idUnik === "-") return;
+    void ambilFotoPersonil(idUnik)
+      .then((res) => {
+        if (!active) return;
+        if (res?.foto_base64) {
+          const mime = res.foto_mime || "image/jpeg";
+          const dataUrl = res.foto_base64.startsWith("data:")
+            ? res.foto_base64
+            : `data:${mime};base64,${res.foto_base64}`;
+          setPhotoUrl(dataUrl);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [idUnik, employee.avatar_url]);
+
   const handleCardClick = () => {
     triggerHaptic("light");
     onOpenDetail(employee);
@@ -56,15 +86,28 @@ export function EmployeeCard({ employee, onOpenDetail }: EmployeeCardProps) {
     <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4 backdrop-blur-md shadow-sm transition-all">
       {/* Baris Utama: Avatar + Identitas */}
       <div className="flex items-start gap-3 min-w-0">
-        {/* Avatar Inisial */}
+        {/* Avatar Foto / Inisial */}
         <div className="relative shrink-0">
           <div
-            className="grid size-11 place-items-center rounded-2xl text-sm font-black text-white shadow-md"
-            style={{
-              background: `linear-gradient(135deg, hsl(${avatarHue},70%,35%) 0%, hsl(${avatarHue},50%,22%) 100%)`,
-            }}
+            className="grid size-11 place-items-center rounded-2xl text-sm font-black text-white shadow-md overflow-hidden border border-white/10"
+            style={
+              !photoUrl
+                ? {
+                    background: `linear-gradient(135deg, hsl(${avatarHue},70%,35%) 0%, hsl(${avatarHue},50%,22%) 100%)`,
+                  }
+                : undefined
+            }
           >
-            {inisial || "??"}
+            {photoUrl ? (
+              // biome-ignore lint/performance/noImgElement: avatar photo
+              <img
+                src={photoUrl}
+                alt={nama}
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              inisial || "??"
+            )}
           </div>
           {/* Indikator status aktif sebagai titik di sudut avatar */}
           <span

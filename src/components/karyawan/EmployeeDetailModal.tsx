@@ -1,12 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { DigitalIdCardPreview } from "@/components/karyawan/DigitalIdCardPreview";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { openExternalLink } from "@/lib/client/external-link";
 import { triggerHaptic } from "@/lib/client/haptics";
+import { ambilFotoPersonil } from "@/lib/gateways/personnel-photo";
 
 type DetailTab = "idcard" | "info" | "aksi";
 
@@ -109,25 +110,26 @@ export function EmployeeDetailModal({
   const [toggleError, setToggleError] = useState<string | null>(null);
   const [contactError, setContactError] = useState<string | null>(null);
   const [copyToast, setCopyToast] = useState<string | null>(null);
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
+  const [loadingPhoto, setLoadingPhoto] = useState(false);
 
-  if (!employee) return null;
-
-  const nama = String(employee.nama ?? "-");
-  const kodeKaryawan = String(employee.kode_karyawan ?? "-");
-  const idUnik = String(employee.id_unik ?? "-");
-  const divisi = String(employee.divisi ?? "-");
-  const jabatan = String(employee.jabatan_status ?? "-");
-  const noHp = String(employee.no_hp ?? "");
-  const lp = String(employee.lp ?? "-");
-  const namaShift = String(employee.nama_shift ?? "-");
-  const statusAktif = String(employee.status_aktif ?? "Aktif");
-  const tglDaftar = fmtDate(employee.tanggal_daftar);
-  const catatan = String(employee.catatan ?? "");
-  const jenisPersonil = String(employee.jenis_personil ?? "-");
-  const mulaiAktif = fmtDate(employee.tanggal_mulai_aktif);
-  const selesaiAktif = fmtDate(employee.tanggal_selesai_aktif);
-  const statusQr = String(employee.status_qr ?? "Belum");
-  const statusBackup = String(employee.status_backup ?? "NORMAL");
+  const emp = employee ?? {};
+  const nama = String(emp.nama ?? "-");
+  const kodeKaryawan = String(emp.kode_karyawan ?? "-");
+  const idUnik = String(emp.id_unik ?? "-");
+  const divisi = String(emp.divisi ?? "-");
+  const jabatan = String(emp.jabatan_status ?? "-");
+  const noHp = String(emp.no_hp ?? "");
+  const lp = String(emp.lp ?? "-");
+  const namaShift = String(emp.nama_shift ?? "-");
+  const statusAktif = String(emp.status_aktif ?? "Aktif");
+  const tglDaftar = fmtDate(emp.tanggal_daftar);
+  const catatan = String(emp.catatan ?? "");
+  const jenisPersonil = String(emp.jenis_personil ?? "-");
+  const mulaiAktif = fmtDate(emp.tanggal_mulai_aktif);
+  const selesaiAktif = fmtDate(emp.tanggal_selesai_aktif);
+  const statusQr = String(emp.status_qr ?? "Belum");
+  const statusBackup = String(emp.status_backup ?? "NORMAL");
 
   const avatarHue = getAvatarHue(nama);
   const inisial = nama
@@ -139,6 +141,37 @@ export function EmployeeDetailModal({
 
   const isAktif = statusAktif === "Aktif";
   const isBackup = statusBackup === "BACKUP";
+
+  useEffect(() => {
+    if (!isOpen || !idUnik || idUnik === "-") {
+      setPhotoUrl(null);
+      return;
+    }
+    let active = true;
+    setLoadingPhoto(true);
+    void ambilFotoPersonil(idUnik)
+      .then((res) => {
+        if (!active) return;
+        if (res?.foto_base64) {
+          const mime = res.foto_mime || "image/jpeg";
+          const dataUrl = res.foto_base64.startsWith("data:")
+            ? res.foto_base64
+            : `data:${mime};base64,${res.foto_base64}`;
+          setPhotoUrl(dataUrl);
+        } else {
+          setPhotoUrl(null);
+        }
+      })
+      .catch(() => {
+        if (active) setPhotoUrl(null);
+      })
+      .finally(() => {
+        if (active) setLoadingPhoto(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isOpen, idUnik]);
 
   // Validasi & normalisasi nomor telepon dan WhatsApp
   const rawNoHp = noHp.trim();
@@ -222,6 +255,8 @@ export function EmployeeDetailModal({
     ...(canManage ? ([{ key: "aksi", label: "Aksi" }] as const) : []),
   ];
 
+  if (!employee) return null;
+
   return (
     <Modal
       isOpen={isOpen}
@@ -242,15 +277,30 @@ export function EmployeeDetailModal({
       {/* Hero Profile Header */}
       <div className="mb-4 rounded-2xl border border-white/10 bg-gradient-to-b from-slate-800/80 to-slate-900/80 p-3.5 shadow-lg backdrop-blur-md">
         <div className="flex items-center gap-3">
-          {/* Avatar Inisial */}
+          {/* Avatar Inisial / Foto */}
           <div className="relative shrink-0">
             <div
-              className="grid size-12 place-items-center rounded-2xl text-base font-black text-white shadow-md border border-white/20"
-              style={{
-                background: `linear-gradient(135deg, hsl(${avatarHue},70%,35%) 0%, hsl(${avatarHue},50%,22%) 100%)`,
-              }}
+              className="grid size-12 place-items-center rounded-2xl text-base font-black text-white shadow-md border border-white/20 overflow-hidden"
+              style={
+                !photoUrl
+                  ? {
+                      background: `linear-gradient(135deg, hsl(${avatarHue},70%,35%) 0%, hsl(${avatarHue},50%,22%) 100%)`,
+                    }
+                  : undefined
+              }
             >
-              {inisial || "??"}
+              {loadingPhoto ? (
+                <div className="size-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+              ) : photoUrl ? (
+                // biome-ignore lint/performance/noImgElement: Hero avatar
+                <img
+                  src={photoUrl}
+                  alt={nama}
+                  className="h-full w-full object-cover"
+                />
+              ) : (
+                inisial || "??"
+              )}
             </div>
             {/* Status Dot */}
             <span
@@ -328,6 +378,47 @@ export function EmployeeDetailModal({
       {/* Tab 2: Informasi Lengkap (16 Kolom) */}
       {activeTab === "info" ? (
         <div className="flex flex-col gap-3">
+          {/* Foto Resmi Karyawan (ID Card) */}
+          <div className="rounded-2xl border border-white/10 bg-slate-800/40 p-3.5 shadow-sm">
+            <div className="flex items-center gap-1.5 mb-2.5">
+              <Icon name="id-card" className="size-3.5 text-sky-400" />
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                Foto Resmi Karyawan (ID Card)
+              </p>
+            </div>
+            <div className="flex items-center gap-3.5">
+              <div className="relative flex h-24 w-20 flex-shrink-0 items-center justify-center overflow-hidden rounded-xl border border-white/20 bg-slate-900 shadow-md">
+                {loadingPhoto ? (
+                  <div className="size-5 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
+                ) : photoUrl ? (
+                  // biome-ignore lint/performance/noImgElement: Detail photo preview
+                  <img
+                    src={photoUrl}
+                    alt={nama}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center gap-1 text-slate-500">
+                    <Icon name="user" className="size-6" />
+                    <span className="text-[9px] font-semibold text-slate-400">
+                      Belum Ada
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-col gap-1 min-w-0 flex-1 text-xs">
+                <span className="font-semibold text-slate-200">
+                  {photoUrl ? "Foto Resmi Terpasang" : "Belum Ada Foto"}
+                </span>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  {photoUrl
+                    ? "Foto ini digunakan untuk rendering cetak ID Card fisik, preview digital, dan identitas resmi."
+                    : "Unggah foto berformat JPEG/PNG melalui menu Edit Karyawan untuk mencetak ID Card dengan foto."}
+                </p>
+              </div>
+            </div>
+          </div>
+
           {/* Grup 1: Identitas Pegawai */}
           <div className="rounded-2xl border border-white/10 bg-slate-800/40 p-3.5 shadow-sm">
             <div className="flex items-center gap-1.5 mb-2">
