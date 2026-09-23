@@ -240,6 +240,17 @@ impl MobileState {
         })
     }
 
+    pub fn set_server_url(&self, raw_url: &str) -> Result<String, CommandError> {
+        let parsed = parse_server_url(raw_url)?;
+        let origin = parsed.origin().ascii_serialization();
+        storage::set_system_setting(&self.data_dir, "server_api_base_url", parsed.as_str())?;
+        *self
+            .server_origin
+            .write()
+            .map_err(|_| CommandError::internal())? = origin.clone();
+        Ok(origin)
+    }
+
     pub fn server_origin(&self) -> String {
         self.server_origin
             .read()
@@ -405,17 +416,6 @@ impl MobileState {
             .write()
             .map_err(|_| CommandError::internal())? = origin.clone();
 
-        Ok(origin)
-    }
-
-    pub fn set_server_url(&self, raw_url: &str) -> Result<String, CommandError> {
-        let parsed = parse_server_url(raw_url)?;
-        let origin = parsed.origin().ascii_serialization();
-        storage::set_system_setting(&self.data_dir, "server_api_base_url", parsed.as_str())?;
-        *self
-            .server_origin
-            .write()
-            .map_err(|_| CommandError::internal())? = origin.clone();
         Ok(origin)
     }
 }

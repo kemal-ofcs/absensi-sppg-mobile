@@ -98,6 +98,11 @@ export function ScannerView() {
   /** `startCamera` didefinisikan setelah blok ini; ref menjembataninya. */
   const startCameraRef = useRef<(() => Promise<void>) | null>(null);
   const scannerControlsRef = useRef<IScannerControls | null>(null);
+  // Dinaikkan setiap kamera dihentikan. `decodeFromConstraints` bisa menunggu
+  // lama (dialog izin kamera); bila halaman ditinggalkan atau kamera dimatikan
+  // selama itu, kontrol yang baru tiba wajib langsung dihentikan, bukan
+  // disimpan. Tanpa ini kamera tetap menyala setelah pemindai ditutup.
+  const cameraGenRef = useRef(0);
   const isSubmittingRef = useRef(false);
   const lastScannedQrRef = useRef<string>("");
   const lastScannedTimeRef = useRef<number>(0);
@@ -130,6 +135,7 @@ export function ScannerView() {
 
   // Stop camera helper
   const stopCamera = useCallback(() => {
+    cameraGenRef.current += 1;
     scannerControlsRef.current?.stop();
     scannerControlsRef.current = null;
     const stream = videoRef.current?.srcObject;
@@ -162,6 +168,7 @@ export function ScannerView() {
   // Clean up scanner and media tracks on component unmount
   useEffect(() => {
     return () => {
+      cameraGenRef.current += 1;
       scannerControlsRef.current?.stop();
       const stream = videoRef.current?.srcObject;
       if (stream instanceof MediaStream) {
@@ -483,6 +490,7 @@ export function ScannerView() {
   const startCamera = useCallback(async () => {
     stopCamera();
     setCameraError(null);
+    const gen = cameraGenRef.current;
 
     if (!videoRef.current) return;
 
@@ -529,6 +537,10 @@ export function ScannerView() {
         );
       }
 
+      if (gen !== cameraGenRef.current) {
+        controls.stop();
+        return;
+      }
       scannerControlsRef.current = controls;
       setCameraActive(true);
 

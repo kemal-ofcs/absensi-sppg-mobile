@@ -84,7 +84,6 @@
     "allow-desktop-get-id-card-template",
     "allow-desktop-save-id-card-template",
     "allow-desktop-force-resync-settings",
-    "allow-desktop-debug-template-sync",
     "allow-desktop-get-geofence-settings",
     "allow-desktop-update-geofence-settings",
     "allow-desktop-get-scanner-settings",

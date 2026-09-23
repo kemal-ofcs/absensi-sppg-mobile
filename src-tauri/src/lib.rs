@@ -104,7 +104,6 @@ pub fn run() {
             mobile::commands::desktop_get_id_card_template,
             mobile::commands::desktop_save_id_card_template,
             mobile::commands::desktop_force_resync_settings,
-            mobile::commands::desktop_debug_template_sync,
             mobile::commands::desktop_get_geofence_settings,
             mobile::commands::desktop_update_geofence_settings,
             mobile::commands::desktop_get_scanner_settings,

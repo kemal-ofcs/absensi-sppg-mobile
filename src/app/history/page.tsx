@@ -144,11 +144,11 @@ export default function HistoryPage() {
   const canDeleteHistory = hasPermission(user, "history.delete");
 
   const [activeTab, setActiveTab] = useState<HistoryTab>("daily");
-  const [tanggalMulai, setTanggalMulai] = useState<string>(
-    () => new Date().toISOString().split("T")[0],
+  const [tanggalMulai, setTanggalMulai] = useState<string>(() =>
+    new Date().toLocaleDateString("en-CA"),
   );
-  const [tanggalSelesai, setTanggalSelesai] = useState<string>(
-    () => new Date().toISOString().split("T")[0],
+  const [tanggalSelesai, setTanggalSelesai] = useState<string>(() =>
+    new Date().toLocaleDateString("en-CA"),
   );
   const [dailyRecords, setDailyRecords] = useState<Record<string, unknown>[]>(
     [],

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { Icon } from "@/components/ui/Icon";
 import { canAccessArea, hasPermission } from "@/lib/auth/access";
@@ -57,8 +57,8 @@ export default function OperationalPage() {
   const router = useRouter();
 
   const [activeTab, setActiveTab] = useState<OperationalTab>("koreksi");
-  const [date, setDate] = useState<string>(
-    () => new Date().toISOString().split("T")[0],
+  const [date, setDate] = useState<string>(() =>
+    new Date().toLocaleDateString("en-CA"),
   );
 
   // Data Masters
@@ -154,24 +154,32 @@ export default function OperationalPage() {
   }, [isAuthenticated, isOperational]);
 
   // Load tab-specific records on date or tab change
+  // Nomor urut muat terakhir. Pindah tab atau tanggal saat request lama belum
+  // selesai membuat respons lama bisa tiba belakangan dan menimpa data yang
+  // sedang dilihat; hanya respons dari muat terbaru yang boleh diterapkan.
+  const loadSeqRef = useRef(0);
   const loadTabRecords = useCallback(
     async (targetDate: string, tab: OperationalTab) => {
+      const seq = ++loadSeqRef.current;
       setLoadingList(true);
       try {
         if (tab === "koreksi") {
           const data = await getDaftarKoreksi({ tanggal: targetDate });
+          if (seq !== loadSeqRef.current) return;
           setCorrections(data || []);
         } else if (tab === "backup") {
           const data = await getDaftarBackup({ tanggal: targetDate });
+          if (seq !== loadSeqRef.current) return;
           setBackups(data || []);
         } else if (tab === "manual") {
           const data = await getDaftarImport({ tanggal: targetDate });
+          if (seq !== loadSeqRef.current) return;
           setImports(data || []);
         }
       } catch {
         // Silently handled
       } finally {
-        setLoadingList(false);
+        if (seq === loadSeqRef.current) setLoadingList(false);
       }
     },
     [],

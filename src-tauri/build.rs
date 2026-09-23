@@ -79,7 +79,6 @@ const MOBILE_COMMANDS: &[&str] = &[
     "desktop_get_id_card_template",
     "desktop_save_id_card_template",
     "desktop_force_resync_settings",
-    "desktop_debug_template_sync",
     "desktop_get_geofence_settings",
     "desktop_update_geofence_settings",
     "desktop_get_scanner_settings",
