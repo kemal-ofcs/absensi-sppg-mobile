@@ -39,7 +39,7 @@ export default function SyncPage() {
       router.replace("/login");
       return;
     }
-    // Otorisasi, bukan sekadar autentikasi (sama seperti Project Meksa).
+    // Otorisasi, bukan sekadar autentikasi.
     // Halaman ini menampilkan konflik sinkronisasi yang memuat payload lintas
     // domain. Mobile tidak punya rute `/forbidden`.
     if (!authLoading && isAuthenticated && !canViewSync) {

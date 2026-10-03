@@ -39,6 +39,12 @@ base64 = "0.22"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 hmac = "0.12"
 rust_decimal = { version = "1.36", features = ["serde-with-str", "maths"] }
+# Verifikasi tanda tangan Ed25519 lisensi offline (`license.rs`).
+ring = "0.17"
+
+# MachineGuid Windows untuk kode perangkat lisensi saat `cargo test` di PC.
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
 
 [dev-dependencies]
 # Hanya untuk tes: `ensure_schema` bersifat async, dan menguji provisioning

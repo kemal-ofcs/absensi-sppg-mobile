@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import { LicenseHolderLabel } from "@/components/license/LicenseNotice";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Icon } from "@/components/ui/Icon";
@@ -358,6 +359,7 @@ Status: LUNAS / DIBAYAR`;
                 Telah ditransfer ke rekening karyawan terdaftar
               </p>
             </div>
+            <LicenseHolderLabel className="block text-center text-[10px] text-slate-500" />
           </div>
         )}
       </div>

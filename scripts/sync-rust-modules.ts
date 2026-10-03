@@ -35,6 +35,9 @@ const filesToSync = [
   // yang menjaganya tetap sama — persis kelas drift yang membuat aturan shift
   // berbeda antar platform.
   "time_policy.rs",
+  // Lisensi offline Ed25519: pemeriksa yang sama persis di Desktop dan Mobile,
+  // karena keduanya membaca `app_license` yang sama lewat sync.
+  "license.rs",
 ];
 
 /** Sesuaikan tipe & jalur modul Desktop ke padanan Mobile. */

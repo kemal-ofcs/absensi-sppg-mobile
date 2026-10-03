@@ -28,6 +28,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             mobile::commands::desktop_get_session,
             mobile::commands::desktop_get_runtime_status,
+            mobile::commands::desktop_get_license_status,
+            mobile::commands::desktop_install_license,
             mobile::commands::desktop_get_bootstrap_status,
             mobile::commands::desktop_bootstrap_superadmin,
             mobile::commands::desktop_check_bootstrap_database,
@@ -137,8 +139,6 @@ pub fn run() {
             mobile::commands::desktop_save_alfa_settings,
             mobile::commands::desktop_trigger_generate_alfa,
             mobile::commands::desktop_get_attendance_audit,
-            mobile::commands::desktop_get_server_url,
-            mobile::commands::desktop_set_server_url,
             mobile::commands::desktop_get_turso_url,
             mobile::commands::desktop_get_database_config,
             mobile::commands::desktop_save_turso_config,

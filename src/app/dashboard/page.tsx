@@ -57,7 +57,7 @@ export default function DashboardPage() {
         }
       } catch (err) {
         // Diam berarti dasbor tampil kosong dan tidak bisa dibedakan dari hari
-        // yang memang belum ada aktivitasnya (sama seperti Project Meksa).
+        // yang memang belum ada aktivitasnya.
         if (!cancelled) {
           setLoadError(
             err instanceof Error

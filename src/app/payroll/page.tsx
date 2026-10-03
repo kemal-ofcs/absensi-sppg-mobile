@@ -190,7 +190,7 @@ export default function MobilePayrollPortalPage() {
       router.push("/login");
       return;
     }
-    // Otorisasi, bukan sekadar autentikasi (sama seperti Project Meksa). Tanpa
+    // Otorisasi, bukan sekadar autentikasi. Tanpa
     // baris ini setiap operator dengan sesi yang sah bisa membuka slip gaji
     // beserta datanya. Mobile tidak punya rute `/forbidden`.
     if (!canAccessArea(user, "payroll")) {

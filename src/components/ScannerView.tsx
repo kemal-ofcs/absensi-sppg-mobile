@@ -15,6 +15,10 @@ import {
 } from "@/lib/client/geolocation";
 import { triggerHaptic } from "@/lib/client/haptics";
 import {
+  CARD_RELEASE_MS,
+  createQrReleaseGate,
+} from "@/lib/client/qr-release-gate";
+import {
   captureScanPhoto,
   isFaceVisible,
   openFaceCamera,
@@ -95,6 +99,12 @@ export function ScannerView() {
   const faceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Kamera QR sedang hidup sebelum penahanan, jadi wajib dinyalakan lagi. */
   const resumeCameraRef = useRef(false);
+  /** Kartu yang baru ditahan tidak memicu jendela foto lagi sebelum dijauhkan. */
+  const releaseGateRef = useRef(createQrReleaseGate());
+  const [kartuMasihTerbaca, setKartuMasihTerbaca] = useState(false);
+  const releaseHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   /** `startCamera` didefinisikan setelah blok ini; ref menjembataninya. */
   const startCameraRef = useRef<(() => Promise<void>) | null>(null);
   const scannerControlsRef = useRef<IScannerControls | null>(null);
@@ -403,22 +413,25 @@ export function ScannerView() {
   /**
    * Nyalakan kembali kamera pemindai setelah penahanan selesai.
    *
-   * Debounce QR terakhir ikut disegarkan: kartu yang sama masih di depan lensa
-   * saat kamera hidup lagi, dan tanpa ini ia langsung terbaca ulang lalu
-   * ditolak backend sebagai scan ganda.
+   * Kartu yang sama biasanya masih di depan lensa saat kamera hidup lagi. Jeda
+   * waktu saja tidak cukup: setelah Batal atau scan ditolak, kartu yang masih
+   * dipegang terbaca lagi dan jendela foto terbuka berulang tanpa akhir. Karena
+   * itu QR-nya ditahan sampai kartunya TIDAK terlihat `CARD_RELEASE_MS`
+   * berturut-turut (`qr-release-gate.ts`).
    */
-  const resumeQrCamera = useCallback(() => {
+  const resumeQrCamera = useCallback((qr: string) => {
     if (!resumeCameraRef.current) return;
     resumeCameraRef.current = false;
-    lastScannedTimeRef.current = Date.now();
+    releaseGateRef.current.block(qr, Date.now());
     void startCameraRef.current?.();
   }, []);
 
   const closePhotoHold = useCallback(() => {
+    const qr = pendingScan;
     stopFaceCamera();
     setPendingScan(null);
-    resumeQrCamera();
-  }, [stopFaceCamera, resumeQrCamera]);
+    if (qr) resumeQrCamera(qr);
+  }, [pendingScan, stopFaceCamera, resumeQrCamera]);
 
   const capturePhotoAndSubmit = useCallback(async () => {
     const qr = pendingScan;
@@ -433,7 +446,7 @@ export function ScannerView() {
     await submitScan(qr, photo);
     // Kamera pemindai baru dinyalakan SETELAH absensi terkirim, supaya kartu
     // yang masih menempel di lensa tidak terbaca ulang selagi permintaan jalan.
-    resumeQrCamera();
+    resumeQrCamera(qr);
   }, [pendingScan, stopFaceCamera, resumeQrCamera, submitScan]);
 
   // Fase membidik lalu menahan diam sejenak sebelum memotret sendiri.
@@ -514,26 +527,37 @@ export function ScannerView() {
         };
       }
 
+      const onDecode = (result: { getText: () => string } | undefined) => {
+        const qr = result?.getText().trim();
+        if (!qr) return;
+        if (releaseGateRef.current.allows(qr, Date.now())) {
+          void handleProcessQr(qr);
+          return;
+        }
+        // Pesannya hilang sendiri begitu kartu dianggap sudah dijauhkan:
+        // setelah itu kamera tidak membaca apa pun yang bisa menghapusnya.
+        setKartuMasihTerbaca(true);
+        if (releaseHintTimerRef.current) {
+          clearTimeout(releaseHintTimerRef.current);
+        }
+        releaseHintTimerRef.current = setTimeout(
+          () => setKartuMasihTerbaca(false),
+          CARD_RELEASE_MS,
+        );
+      };
+
       let controls: IScannerControls;
       try {
         controls = await codeReader.decodeFromConstraints(
           constraints,
           videoRef.current,
-          (result, _error) => {
-            if (result) {
-              void handleProcessQr(result.getText());
-            }
-          },
+          onDecode,
         );
       } catch {
         controls = await codeReader.decodeFromConstraints(
           { video: true },
           videoRef.current,
-          (result, _error) => {
-            if (result) {
-              void handleProcessQr(result.getText());
-            }
-          },
+          onDecode,
         );
       }
 
@@ -797,6 +821,13 @@ export function ScannerView() {
           ⚠️ {cameraError}
         </div>
       )}
+
+      {kartuMasihTerbaca ? (
+        <p className="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs text-amber-100">
+          Kartu yang sama masih terbaca. Jauhkan dari kamera sebentar untuk
+          memindai ulang.
+        </p>
+      ) : null}
 
       {/* Hardware Toggles & Manual Input Bar */}
       <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-3.5 backdrop-blur-md">

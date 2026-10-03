@@ -1,5 +1,5 @@
 import { cpSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const desktopSrc = join(__dirname, "../../web-desktop/src");
 const mobileSrc = join(__dirname, "../src");
@@ -13,12 +13,23 @@ if (existsSync(desktopIcons)) {
   console.log("Copied icons to src-tauri/icons");
 }
 
-const filesToCopy = ["lib/db.ts", "lib/db-schema.ts", "lib/db-migrations.ts"];
+const filesToCopy = [
+  "lib/db.ts",
+  "lib/db-schema.ts",
+  "lib/db-migrations.ts",
+  // UI lisensi: identik di kedua build supaya layar aktivasi, nama dan kode
+  // perangkat, serta mode baca-saja tidak pernah berbeda antara PC dan HP.
+  "components/license/LicenseActivationPanel.tsx",
+  "components/license/LicenseBootstrapField.tsx",
+  "components/license/LicenseCard.tsx",
+  "components/license/LicenseNotice.tsx",
+];
 
 for (const file of filesToCopy) {
   const src = join(desktopSrc, file);
   const dest = join(mobileSrc, file);
   if (existsSync(src)) {
+    mkdirSync(dirname(dest), { recursive: true });
     cpSync(src, dest);
     console.log(`Copied ${file} to mobile`);
   }
@@ -33,6 +44,7 @@ const dirsToCopy = [
   "lib/contracts",
   "lib/gateways",
   "lib/hooks",
+  "lib/license",
   // Konfigurasi pengirim email sistem dan mesin liveness "Lupa Password":
   // keduanya murni logika lintas platform dan WAJIB identik di kedua workspace
   // karena Web menghitung ulang vonis liveness dengan modul yang sama.

@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import { BootstrapPanel } from "@/components/BootstrapPanel";
+import { LicenseActivationPanel } from "@/components/license/LicenseActivationPanel";
 import { BrandLogo } from "@/components/ui/BrandLogo";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { triggerHaptic } from "@/lib/client/haptics";
@@ -19,9 +20,10 @@ import {
   type BootstrapStatus,
   getBootstrapStatus,
 } from "@/lib/gateways/bootstrap";
-import { getServerUrl, setServerUrl } from "@/lib/gateways/server-config";
+import { isLicenseBlocking } from "@/lib/gateways/license";
 import { useAppName } from "@/lib/hooks/useAppName";
 import { useCompanyName } from "@/lib/hooks/useCompanyName";
+import { useLicenseStatus } from "@/lib/hooks/useLicenseStatus";
 import { useOnlineStatus } from "@/lib/hooks/useOnlineStatus";
 
 function parseCooldownSeconds(msg: string): number {
@@ -84,6 +86,22 @@ export default function LoginPage() {
     refreshBootstrapStatus();
   }, [refreshBootstrapStatus]);
 
+  // Dibaca setelah status database diketahui: database yang belum
+  // diprovisioning meminta lisensinya di BootstrapPanel.
+  const {
+    status: licenseStatus,
+    refresh: refreshLicense,
+    setStatus: setLicenseStatus,
+  } = useLicenseStatus(false);
+  // Dibaca ulang setiap status database berubah: perangkat yang baru
+  // bergabung ke database berlisensi menemukan lisensinya di sana.
+  useEffect(() => {
+    if (bootstrapStatus) void refreshLicense();
+  }, [bootstrapStatus, refreshLicense]);
+  // Pemasangan baru meminta lisensi SEBELUM provisioning. HP milik lembaga
+  // yang sudah berlisensi melewatinya: lisensinya ada di database tujuan.
+  const [joiningLicensedDatabase, setJoiningLicensedDatabase] = useState(false);
+
   // Live countdown ticker
   useEffect(() => {
     if (cooldownSeconds <= 0) return;
@@ -99,29 +117,11 @@ export default function LoginPage() {
     return () => clearInterval(timer);
   }, [cooldownSeconds]);
 
-  // Server Endpoint Settings state
-  const [serverUrl, setServerUrlState] = useState(
-    "https://absensi-sppg-seven.vercel.app",
-  );
-  const [isServerModalOpen, setIsServerModalOpen] = useState(false);
-  const [customServerUrl, setCustomServerUrl] = useState("");
-  const [serverSaveMessage, setServerSaveMessage] = useState("");
-  const [isSavingServer, setIsSavingServer] = useState(false);
-
   useEffect(() => {
     if (!authLoading && isAuthenticated) {
       router.replace("/dashboard");
     }
   }, [authLoading, isAuthenticated, router]);
-
-  useEffect(() => {
-    void getServerUrl().then((url) => {
-      if (url) {
-        setServerUrlState(url);
-        setCustomServerUrl(url);
-      }
-    });
-  }, []);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -154,6 +154,7 @@ export default function LoginPage() {
         setErrorMessage(msg);
         const cooldown = parseCooldownSeconds(msg);
         if (cooldown > 0) setCooldownSeconds(cooldown);
+        void refreshLicense();
       }
     } catch (err: unknown) {
       triggerHaptic("error");
@@ -164,34 +165,12 @@ export default function LoginPage() {
       setErrorMessage(message);
       const cooldown = parseCooldownSeconds(message);
       if (cooldown > 0) setCooldownSeconds(cooldown);
+      // Login bisa ditolak karena lisensinya; membaca ulang status memunculkan
+      // layar aktivasi alih-alih membiarkan form login buntu.
+      void refreshLicense();
     } finally {
       setIsSubmitting(false);
       isSubmittingRef.current = false;
-    }
-  };
-
-  const handleSaveServerUrl = async (urlToSave: string) => {
-    const target = urlToSave.trim();
-    if (!target) return;
-    setIsSavingServer(true);
-    setServerSaveMessage("");
-    try {
-      const savedOrigin = await setServerUrl(target);
-      setServerUrlState(savedOrigin);
-      setCustomServerUrl(savedOrigin);
-      setServerSaveMessage(`Server berhasil disetel ke: ${savedOrigin}`);
-      triggerHaptic("success");
-      setTimeout(() => {
-        setIsServerModalOpen(false);
-        setServerSaveMessage("");
-      }, 1200);
-    } catch (err: unknown) {
-      triggerHaptic("error");
-      setServerSaveMessage(
-        err instanceof Error ? err.message : "Gagal menyimpan URL server.",
-      );
-    } finally {
-      setIsSavingServer(false);
     }
   };
 
@@ -203,6 +182,36 @@ export default function LoginPage() {
           <span className="text-xs font-semibold text-slate-400">
             Memeriksa konfigurasi database...
           </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (
+    !isAuthenticated &&
+    bootstrapStatus?.required &&
+    !joiningLicensedDatabase &&
+    licenseStatus &&
+    isLicenseBlocking(licenseStatus)
+  ) {
+    return (
+      <div className="min-h-dvh flex items-center bg-slate-950 p-4 pt-[calc(1.5rem+env(safe-area-inset-top))] pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
+        <div className="w-full max-w-sm mx-auto rounded-3xl border border-white/15 bg-slate-900/90 p-6 shadow-2xl">
+          <p className="mb-3 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+            Langkah 1 dari 2 · setelah lisensi aktif, lanjut ke pengaturan
+            database
+          </p>
+          <LicenseActivationPanel
+            status={licenseStatus}
+            onInstalled={setLicenseStatus}
+          />
+          <button
+            type="button"
+            onClick={() => setJoiningLicensedDatabase(true)}
+            className="mt-3 min-h-10 w-full rounded-xl border border-sky-500/30 bg-sky-500/10 px-3 text-xs font-semibold text-sky-300 active:scale-[0.98] transition"
+          >
+            Perangkat ini bergabung ke database lembaga yang sudah berlisensi
+          </button>
         </div>
       </div>
     );
@@ -224,6 +233,29 @@ export default function LoginPage() {
         onCompleted={refreshBootstrapStatus}
         onCancel={() => setShowDatabaseSetup(false)}
       />
+    );
+  }
+
+  if (!isAuthenticated && licenseStatus && isLicenseBlocking(licenseStatus)) {
+    return (
+      <div className="min-h-dvh flex items-center bg-slate-950 p-4 pt-[calc(1.5rem+env(safe-area-inset-top))] pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
+        <div className="w-full max-w-sm mx-auto rounded-3xl border border-white/15 bg-slate-900/90 p-6 shadow-2xl">
+          <LicenseActivationPanel
+            status={licenseStatus}
+            onInstalled={(next) => {
+              setLicenseStatus(next);
+              setErrorMessage("");
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => setShowDatabaseSetup(true)}
+            className="mt-3 min-h-10 w-full rounded-xl border border-sky-500/30 bg-sky-500/10 px-3 text-xs font-semibold text-sky-300 active:scale-[0.98] transition"
+          >
+            Koneksi Database
+          </button>
+        </div>
+      </div>
     );
   }
 
@@ -256,14 +288,10 @@ export default function LoginPage() {
 
             <button
               type="button"
-              onClick={() => {
-                setCustomServerUrl(serverUrl);
-                setServerSaveMessage("");
-                setIsServerModalOpen(true);
-              }}
+              onClick={() => setShowDatabaseSetup(true)}
               className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-300 hover:bg-sky-500/20 active:scale-95 transition"
             >
-              <span>⚙️ Server</span>
+              <span>Koneksi Database</span>
             </button>
           </div>
         </div>
@@ -422,121 +450,15 @@ export default function LoginPage() {
             </div>
           </form>
         </div>
-
-        {/* Server Endpoint Active Info */}
-        <div className="mt-4 text-center">
-          <p className="text-[11px] text-slate-400 truncate max-w-xs">
-            Endpoint:{" "}
-            <span className="font-mono text-sky-300">{serverUrl}</span>
-          </p>
-        </div>
       </div>
 
       {/* Footer Info */}
-      <footer className="text-center text-[11px] text-slate-500">
-        {appName} Mobile v0.1 • 100% Offline-First
+      <footer className="text-center text-[11px] text-slate-500 space-y-0.5">
+        {licenseStatus?.license ? (
+          <p>Berlisensi untuk {licenseStatus.license.holder}</p>
+        ) : null}
+        <p>{appName} Mobile v0.1 • 100% Offline-First</p>
       </footer>
-
-      {/* Server Config Modal */}
-      {isServerModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-sm rounded-3xl border border-white/15 bg-slate-900 p-6 shadow-2xl">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-base font-bold text-white flex items-center gap-2">
-                <span>⚙️</span> Pengaturan Server API
-              </h2>
-              <button
-                type="button"
-                onClick={() => setIsServerModalOpen(false)}
-                className="size-8 rounded-full bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center text-sm"
-              >
-                ✕
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-300 mb-4 leading-relaxed">
-              Tentukan alamat server backend yang dituju untuk autentikasi dan
-              sinkronisasi data.
-            </p>
-
-            <div className="mb-4">
-              <label
-                htmlFor="serverUrlInput"
-                className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5"
-              >
-                URL Server Origin
-              </label>
-              <input
-                id="serverUrlInput"
-                type="text"
-                value={customServerUrl}
-                onChange={(e) => setCustomServerUrl(e.target.value)}
-                placeholder="https://absensi-sppg-seven.vercel.app"
-                className="w-full min-h-11 rounded-xl border border-white/15 bg-slate-950 px-3 text-xs font-mono text-white placeholder-slate-600 focus:border-sky-400 focus:outline-none"
-              />
-            </div>
-
-            {/* Quick presets */}
-            <div className="mb-5 flex flex-col gap-2">
-              <span className="text-[11px] font-semibold text-slate-400">
-                Pilihan Cepat:
-              </span>
-              <div className="flex flex-col gap-1.5">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setCustomServerUrl("https://absensi-sppg-seven.vercel.app")
-                  }
-                  className="w-full text-left px-3 py-2 rounded-xl border border-sky-500/20 bg-sky-500/5 hover:bg-sky-500/10 text-xs text-sky-200 transition"
-                >
-                  <span className="font-bold text-sky-400">
-                    ☁️ Cloud Vercel:
-                  </span>
-                  <div className="font-mono text-[10px] text-slate-300">
-                    https://absensi-sppg-seven.vercel.app
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCustomServerUrl("http://127.0.0.1:3000")}
-                  className="w-full text-left px-3 py-2 rounded-xl border border-emerald-500/20 bg-emerald-500/5 hover:bg-emerald-500/10 text-xs text-emerald-200 transition"
-                >
-                  <span className="font-bold text-emerald-400">
-                    💻 USB Reverse / Lokal PC:
-                  </span>
-                  <div className="font-mono text-[10px] text-slate-300">
-                    http://127.0.0.1:3000
-                  </div>
-                </button>
-              </div>
-            </div>
-
-            {serverSaveMessage && (
-              <div className="mb-4 p-2.5 rounded-xl bg-slate-800 border border-white/10 text-xs text-center text-sky-300 font-medium">
-                {serverSaveMessage}
-              </div>
-            )}
-
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setIsServerModalOpen(false)}
-                className="flex-1 min-h-10 rounded-xl border border-white/10 bg-slate-800 text-xs font-bold text-slate-300 hover:bg-slate-700 transition"
-              >
-                Batal
-              </button>
-              <button
-                type="button"
-                disabled={isSavingServer || !customServerUrl.trim()}
-                onClick={() => handleSaveServerUrl(customServerUrl)}
-                className="flex-1 min-h-10 rounded-xl bg-sky-500 font-bold text-xs text-slate-950 hover:bg-sky-400 disabled:opacity-50 transition"
-              >
-                {isSavingServer ? "Menyimpan..." : "Simpan & Terapkan"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

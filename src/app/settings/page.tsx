@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { DatabaseBackupCard } from "@/components/DatabaseBackupCard";
+import { LicenseCard } from "@/components/license/LicenseCard";
 import { MailSettingsCard } from "@/components/MailSettingsCard";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { PasswordRecoveryCard } from "@/components/PasswordRecoveryCard";
@@ -53,7 +54,7 @@ import { validateGeofenceSettings } from "@/lib/validations/geofence";
 import { validateIpAllowlistEntries } from "@/lib/validations/ip-allowlist";
 
 export default function SettingsPage() {
-  // Penjaga anti klik ganda (Aturan 5), sama seperti Project Meksa. `useState`
+  // Penjaga anti klik ganda (Aturan 5). `useState`
   // tidak cukup: dua ketukan dalam satu tick React sama-sama membaca nilai lama.
   const isSubmittingRef = useRef(false);
   const { user, isAuthenticated, isLoading: authLoading, logout } = useAuth();
@@ -337,7 +338,7 @@ export default function SettingsPage() {
     if (isSubmittingRef.current) return;
     triggerHaptic("light");
     // Nilai sebelumnya disimpan supaya sakelarnya bisa DIKEMBALIKAN saat
-    // penyimpanan gagal (sama seperti Project Meksa). Tanpa itu layar tetap
+    // penyimpanan gagal. Tanpa itu layar tetap
     // menampilkan geofencing menyala sementara penyimpanannya menolak.
     const sebelumnya = geofence;
     const updated = { ...geofence, enabled: !geofence.enabled };
@@ -769,6 +770,7 @@ export default function SettingsPage() {
             operator berhak mengamankan akunnya. */}
         <TwoFactorCard />
         <PasswordRecoveryCard />
+        <LicenseCard />
 
         {/* Riwayat Reset Password (butuh izin password_reset.view) */}
         {canViewResetHistory ? (

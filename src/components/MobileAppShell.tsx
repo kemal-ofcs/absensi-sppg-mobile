@@ -9,6 +9,7 @@ import {
 } from "@/lib/gateways/sync-status";
 import { AutoAlfaRunner } from "./AutoAlfaRunner";
 import { AutoSyncRunner } from "./AutoSyncRunner";
+import { LicenseNotice } from "./license/LicenseNotice";
 import { MobileBottomNav } from "./MobileBottomNav";
 import { MobileHeader } from "./MobileHeader";
 import { PullToRefresh } from "./PullToRefresh";
@@ -75,6 +76,7 @@ export function MobileAppShell({
       <AutoAlfaRunner />
       <AutoSyncRunner />
       <MobileHeader />
+      <LicenseNotice />
       <PullToRefresh
         onRefresh={handleRefresh}
         disabled={disablePullRefresh}

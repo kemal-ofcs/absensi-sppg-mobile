@@ -88,8 +88,8 @@ export default function FotoAbsensiMobilePage() {
       router.replace("/login");
       return;
     }
-    // Ditolak izin area: dipulangkan, sama seperti Project Meksa. Mobile
-    // memakai static export dan tidak punya rute `/forbidden`.
+    // Ditolak izin area: dipulangkan. Mobile memakai static export dan tidak
+    // punya rute `/forbidden`.
     if (!authLoading && isAuthenticated && !canView) {
       router.replace("/dashboard");
     }
